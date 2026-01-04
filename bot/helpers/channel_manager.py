@@ -1,6 +1,12 @@
 import asyncio
 from datetime import datetime
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, UserAlreadyParticipant, InviteRequestSent
+from pyrogram.types import ChatPrivileges
+from pyrogram.errors import (
+    UserNotParticipant, 
+    ChatAdminRequired, 
+    UserAlreadyParticipant, 
+    InviteRequestSent
+)
 from bot.client import Clients
 from bot.helpers.database import Database
 from config import Config
@@ -28,7 +34,7 @@ class ChannelManager:
     
     @staticmethod
     async def add_helper_to_channel(chat_id):
-        """Add helper account to channel using invite link method"""
+        """Add helper account to channel and promote to admin"""
         helper_id = await Clients.get_helper_user_id()
         if not helper_id:
             raise RuntimeError("Helper user ID unavailable")
@@ -37,61 +43,105 @@ class ChannelManager:
         try:
             member = await Clients.user_app.get_chat_member(chat_id, "me")
             if member.status in ("member", "administrator", "creator"):
-                await Database.update_channel_membership(chat_id, True)
-                LOGGER.info(f"✅ Helper already in channel {chat_id}")
-                return True
+                # If already admin with promote rights, we're done
+                if member.status in ("administrator", "creator"):
+                    is_admin = True
+                    can_promote = getattr(member.privileges, "can_promote_members", False) if member.privileges else False
+                    if can_promote or member.status == "creator":
+                        await Database.update_channel_membership(chat_id, True)
+                        LOGGER.info(f"✅ Helper already admin in channel {chat_id}")
+                        return True
+                    else:
+                        LOGGER.info(f"Helper is admin but lacks promote permission, will re-promote")
+                else:
+                    # Just a member, need to promote
+                    LOGGER.info(f"Helper is member, needs promotion in {chat_id}")
         except UserNotParticipant:
-            pass
+            pass  # Need to join
         
         # Manage capacity before joining (spam protection)
         await ChannelManager.manage_capacity(chat_id)
         
-        # Method 1: Try direct add first
+        # Step 1: Try to add helper directly using bot
+        helper_added = False
         try:
             await Clients.bot.add_chat_members(chat_id, helper_id)
-            await Database.update_channel_membership(chat_id, True, datetime.utcnow())
+            helper_added = True
             LOGGER.info(f"✅ Helper added to channel {chat_id} via direct add")
             await asyncio.sleep(2)
-            return True
         except UserAlreadyParticipant:
+            helper_added = True
             LOGGER.info(f"Helper already in channel {chat_id}")
-            await Database.update_channel_membership(chat_id, True, datetime.utcnow())
-            return True
         except (ChatAdminRequired, Exception) as e:
             LOGGER.warning(f"Direct add failed: {e}. Trying invite link method...")
         
-        # Method 2: Create invite link and join via user account
-        try:
-            # Create an invite link
-            invite_link = await Clients.bot.export_chat_invite_link(chat_id)
-            LOGGER.info(f"Created invite link for {chat_id}")
-            
-            # Helper joins via the link
+        # Step 2: If direct add failed, use invite link
+        if not helper_added:
             try:
-                await Clients.user_app.join_chat(invite_link)
-                await Database.update_channel_membership(chat_id, True, datetime.utcnow())
-                LOGGER.info(f"✅ Helper joined channel {chat_id} via invite link")
-                await asyncio.sleep(2)
-                return True
-            except InviteRequestSent:
+                # Create an invite link
+                invite_link = await Clients.bot.export_chat_invite_link(chat_id)
+                LOGGER.info(f"Created invite link for {chat_id}")
+                
+                # Helper joins via the link
+                try:
+                    await Clients.user_app.join_chat(invite_link)
+                    helper_added = True
+                    LOGGER.info(f"✅ Helper joined channel {chat_id} via invite link")
+                    await asyncio.sleep(2)
+                except InviteRequestSent:
+                    raise RuntimeError(
+                        "⚠️ Channel requires join approval.\n"
+                        "Please manually approve the join request from @HelpingYouSetup "
+                        "or disable join approval for this setup."
+                    )
+            except ChatAdminRequired:
                 raise RuntimeError(
-                    "Channel requires join approval. Please manually approve the join request "
-                    "from @HelpingYouSetup or disable join approval for this setup."
+                    "Bot lacks permission to create invite links.\n"
+                    "Please ensure the bot has 'Invite Users via Link' permission."
                 )
-        except ChatAdminRequired:
-            raise RuntimeError(
-                "Bot lacks permission to create invite links. "
-                "Please ensure the bot has 'Invite Users via Link' permission."
-            )
-        except Exception as e:
-            LOGGER.error(f"Invite link method failed: {e}")
-            raise RuntimeError(
-                f"Could not add helper to channel. Error: {str(e)}\n"
-                f"Please ensure:\n"
-                f"1. Bot has 'Add New Admins' permission\n"
-                f"2. Bot has 'Invite Users via Link' permission\n"
-                f"3. Channel doesn't require join approval"
-            )
+            except Exception as e:
+                LOGGER.error(f"Invite link method failed: {e}")
+                raise RuntimeError(
+                    f"Could not add helper to channel. Error: {str(e)}\n\n"
+                    f"Please ensure:\n"
+                    f"• Bot has 'Add New Admins' permission\n"
+                    f"• Bot has 'Invite Users via Link' permission\n"
+                    f"• Channel doesn't require join approval"
+                )
+        
+        # Step 3: Now promote helper to admin with necessary permissions
+        if helper_added:
+            try:
+                # Define privileges needed for helper to do its job
+                helper_privileges = ChatPrivileges(
+                    can_manage_chat=True,
+                    can_invite_users=True,
+                    can_promote_members=True,  # Critical: needed to promote bots
+                    can_restrict_members=True
+                )
+                
+                await Clients.bot.promote_chat_member(
+                    chat_id, 
+                    helper_id, 
+                    privileges=helper_privileges
+                )
+                LOGGER.info(f"✅ Helper promoted to admin in {chat_id}")
+                await asyncio.sleep(2)
+                
+                # Update database
+                await Database.update_channel_membership(chat_id, True, datetime.utcnow())
+                return True
+                
+            except ChatAdminRequired:
+                raise RuntimeError(
+                    "Bot cannot promote helper to admin.\n"
+                    "Ensure bot has 'Add New Admins' permission enabled."
+                )
+            except Exception as e:
+                LOGGER.error(f"Failed to promote helper: {e}")
+                raise RuntimeError(f"Failed to promote helper to admin: {str(e)}")
+        
+        return False
     
     @staticmethod
     async def check_helper_membership(chat_id):
