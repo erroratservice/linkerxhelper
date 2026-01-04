@@ -1,0 +1,3 @@
+pyrotgfork
+tgcrypto
+aiohttp
