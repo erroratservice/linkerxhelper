@@ -33,7 +33,8 @@ async def setup_logic(message, chat_id, owner_id):
             LOGGER.info(f"[STEP 2] Adding helper to channel {chat_id}")
             
             try:
-                await ChannelManager.add_helper_to_channel(chat_id)
+                # FIX: Pass 'message' here so ChannelManager can notify user of FloodWaits
+                await ChannelManager.add_helper_to_channel(chat_id, message)
                 LOGGER.info(f"[STEP 2] ✅ Helper successfully added/promoted")
             except Exception as e:
                 LOGGER.error(f"[STEP 2] ❌ FAILED to add helper: {type(e).__name__} - {e}")
@@ -92,7 +93,6 @@ async def setup_logic(message, chat_id, owner_id):
             f"📢 Channel: `{chat_id}`\n"
             f"👑 Owner Linked: `{owner_id}`\n"
             f"🤖 Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n"
-            f"✅ Now you can start sending files in this channel to get direct links."
         )
         if failed:
             text += f"\n⚠️ Failed: {', '.join(failed)}"
