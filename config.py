@@ -50,7 +50,15 @@ class Config:
         }
         missing = [k for k, v in required.items() if not v or (isinstance(v, int) and v == 0)]
         if missing:
-            raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+            raise ValueError(f"❌ Missing environment variables: {', '.join(missing)}")
+        
+        if Config.OWNER_ID == 0:
+            from bot.utils.logger import LOGGER
+            LOGGER.warning("⚠️ OWNER_ID not set - /sync and /stats will be disabled")
         
         # Normalize bot usernames
         Config.BOTS_TO_ADD = Config.validate_bot_usernames(Config.BOTS_TO_ADD)
+        
+        if not Config.BOTS_TO_ADD:
+            from bot.utils.logger import LOGGER
+            LOGGER.warning("⚠️ No bots configured in BOTS_TO_ADD")
