@@ -1,6 +1,7 @@
 import asyncio
 from pyrogram import filters
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired
+from pyrogram.enums import ChatMemberStatus
 from bot.client import Clients
 from bot.helpers.queue import queue_manager
 from bot.helpers.channel_manager import ChannelManager
@@ -130,28 +131,20 @@ async def setup_handler(client, message):
     
     status = await message.reply_text("🔍 **Checking bot permissions...**")
     
-    # Check bot permissions with detailed logging
+    # Check bot permissions with detailed logging - FIX: Use enum comparison
     try:
         LOGGER.info(f"[PERMISSION CHECK] Checking bot permissions in {target_chat}")
         member = await Clients.bot.get_chat_member(target_chat, "me")
         LOGGER.info(f"[PERMISSION CHECK] Bot status: {member.status}")
         LOGGER.info(f"[PERMISSION CHECK] Bot privileges: {member.privileges}")
         
-        is_admin = member.status in ("administrator", "creator")
+        # FIX: Compare enum properly
+        is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
         has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False))
         
         LOGGER.info(f"[PERMISSION CHECK] is_admin: {is_admin}, can_promote_members: {has_promote_flag}")
         
-        # Relaxed check - any admin is allowed
-        can_promote = is_admin
-        
-        if is_admin and not has_promote_flag:
-            LOGGER.warning(
-                f"[PERMISSION CHECK] Bot is admin in {target_chat} but can_promote_members={has_promote_flag}; "
-                "continuing anyway, real rights will be validated during operations."
-            )
-        
-        if not can_promote:
+        if not is_admin:
             LOGGER.error(f"[PERMISSION CHECK] ❌ Bot is not admin in {target_chat}")
             bot_username = await Clients.get_bot_username()
             bot_mention = f"@{bot_username}" if bot_username else "the bot"
@@ -159,6 +152,17 @@ async def setup_handler(client, message):
                 f"⚠️ **Missing permissions!**\n\n"
                 f"{bot_mention} must be an admin in the channel with **Add New Admins** permission enabled.\n\n"
                 f"Please update permissions and try again."
+            )
+            return
+        
+        if not has_promote_flag:
+            LOGGER.error(f"[PERMISSION CHECK] ❌ Bot lacks can_promote_members")
+            bot_username = await Clients.get_bot_username()
+            bot_mention = f"@{bot_username}" if bot_username else "the bot"
+            await status.edit(
+                f"⚠️ **Missing 'Add New Admins' permission!**\n\n"
+                f"{bot_mention} is admin but lacks **Add New Admins** permission.\n\n"
+                f"Please enable this permission and try again."
             )
             return
         
