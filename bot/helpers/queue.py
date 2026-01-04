@@ -191,7 +191,7 @@ class QueueManager:
             await self.sync_db()
             
             self.queue.task_done()
-            LOGGER.info("⏳ Cooling down for 10s before next task...")
-            await asyncio.sleep(10)
+            LOGGER.info("⏳ Cooling down for 15s before next task...")
+            await asyncio.sleep(15)
 
 queue_manager = QueueManager()
