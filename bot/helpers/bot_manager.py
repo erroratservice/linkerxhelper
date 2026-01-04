@@ -37,15 +37,19 @@ class BotManager:
             
             try:
                 if action == "add":
+                    # Try to add bot as member first
                     try:
                         await Clients.user_app.add_chat_members(chat_id, username)
                         await asyncio.sleep(0.5)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        LOGGER.debug(f"add_chat_members({username}) error: {e}")
+                    
+                    # Promote to admin
                     await Clients.user_app.promote_chat_member(chat_id, username, privileges=privileges)
                     success.append(username)
                 
                 elif action == "remove":
+                    # Demote and remove
                     await Clients.user_app.promote_chat_member(
                         chat_id, username, privileges=ChatPrivileges(can_manage_chat=False)
                     )
@@ -56,22 +60,27 @@ class BotManager:
                 await asyncio.sleep(Config.SYNC_ACTION_DELAY)
             
             except FloodWait as fw:
-                LOGGER.warning(f"FloodWait {fw.value}s for {username}")
+                LOGGER.warning(f"⏳ FloodWait {fw.value}s for {username}")
                 await asyncio.sleep(fw.value + 1)
                 try:
                     if action == "add":
                         await Clients.user_app.promote_chat_member(chat_id, username, privileges=privileges)
                         success.append(username)
+                    else:
+                        await Clients.user_app.promote_chat_member(
+                            chat_id, username, privileges=ChatPrivileges(can_manage_chat=False)
+                        )
+                        success.append(username)
                 except Exception as e:
-                    LOGGER.error(f"Retry failed: {e}")
+                    LOGGER.error(f"Retry failed for {username}: {e}")
                     failed.append(username)
             
             except ChatAdminRequired as e:
-                LOGGER.error(f"ChatAdminRequired for {username}: {e}")
+                LOGGER.error(f"ChatAdminRequired for {username} in {chat_id}: {e}")
                 failed.append(username)
             
             except Exception as e:
-                LOGGER.error(f"Failed {username}: {e}")
+                LOGGER.error(f"Failed {username} in {chat_id}: {type(e).__name__} - {e}")
                 failed.append(username)
         
         return success, failed
