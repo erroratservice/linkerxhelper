@@ -1,4 +1,5 @@
 import asyncio
+from pyrogram.errors import FloodWait
 from bot.utils.logger import LOGGER
 
 class QueueManager:
@@ -26,10 +27,14 @@ class QueueManager:
         await self.queue.put(data)
     
     async def update_positions(self):
-        """Update queue positions for waiting users"""
+        """Update queue positions for waiting users with rate limiting"""
         if not self.waiting_users:
             return
-        for i, req in enumerate(self.waiting_users):
+            
+        # Create a copy to iterate safely
+        current_users = list(self.waiting_users)
+        
+        for i, req in enumerate(current_users):
             try:
                 if i == 0:
                     await req["msg"].edit("🔄 **You're Next!**\n⚙️ Starting setup now...")
@@ -39,8 +44,15 @@ class QueueManager:
                         f"📊 {i} user(s) ahead of you\n"
                         f"⏱️ Estimated wait: ~{i*30}s"
                     )
+                
+                # STAGGER UPDATES: Sleep between edits to prevent floodwait
+                await asyncio.sleep(1.5)
+                
+            except FloodWait as e:
+                LOGGER.warning(f"FloodWait during queue update: {e.value}s")
+                await asyncio.sleep(e.value + 1)
             except Exception as e:
-                LOGGER.debug(f"Queue position update failed: {e}")
+                LOGGER.debug(f"Queue position update failed for one user: {e}")
     
     async def worker(self):
         """Process queue requests one by one"""
@@ -48,9 +60,11 @@ class QueueManager:
         while True:
             data = await self.queue.get()
             
+            # Remove from waiting list before processing
             if data in self.waiting_users:
                 self.waiting_users.remove(data)
             
+            # Update positions for remaining users in background
             asyncio.create_task(self.update_positions())
             
             msg = data["msg"]
