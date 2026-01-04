@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import re
+import subprocess
 from pyrogram import filters
 from bot.client import Clients
 from bot.helpers.database import Database
@@ -12,19 +13,21 @@ def sanitize_url(url):
     """Remove tokens from URLs for logging"""
     if not url:
         return url
-    # Replace token with ***
     return re.sub(r'(https?://)[^@]+@', r'\1***@', url)
 
 def run_git_command(cmd):
-    """Run git command safely"""
+    """Run git command safely using subprocess"""
     try:
-        result = os.popen(f"{cmd} 2>&1").read()
-        return result
+        # Use subprocess for better output handling and safety
+        result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+        return result.decode().strip()
+    except subprocess.CalledProcessError as e:
+        return f"Error: {e.output.decode().strip()}"
     except Exception as e:
         return f"Error: {str(e)}"
 
 async def send_restart_notification():
-    """Send notification after restart completes"""
+    """Send notification after restart completes (Called by bot.py on startup)"""
     try:
         # Wait for everything to stabilize
         await asyncio.sleep(5)
@@ -83,9 +86,9 @@ async def send_restart_notification():
         LOGGER.error(f"Failed to send restart notification: {e}")
 
 async def perform_restart(chat_id, message_id, status="success", error=None):
-    """Perform the actual restart"""
+    """Perform the actual restart with safe shutdown"""
     try:
-        # Save restart info for post-restart notification
+        # Save restart info
         await Database.save_restart_info(chat_id, message_id, status, error)
         
         LOGGER.info("=" * 60)
@@ -95,19 +98,17 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         # Stop user client
         LOGGER.info("Stopping user client...")
         try:
-            await Clients.user_app.stop()
+            if Clients.user_app.is_connected:
+                await Clients.user_app.stop()
             LOGGER.info("✅ User client stopped")
         except Exception as e:
             LOGGER.error(f"Error stopping user client: {e}")
         
-        # Stop bot client properly
+        # Stop bot client (FIXED: Properly awaited)
         LOGGER.info("Stopping bot client...")
         try:
-            # Create a task to stop the bot instead of awaiting directly
-            # This avoids the "Task cannot await on itself" error
-            loop = asyncio.get_event_loop()
-            loop.create_task(Clients.bot.stop())
-            await asyncio.sleep(1)  # Give it time to stop
+            if Clients.bot.is_connected:
+                await Clients.bot.stop()
             LOGGER.info("✅ Bot client stopped")
         except Exception as e:
             LOGGER.error(f"Error stopping bot client: {e}")
@@ -124,7 +125,7 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         LOGGER.info("=" * 60)
         
         await asyncio.sleep(0.5)
-        os.execv(sys.executable, [sys.executable, "bot.py"])
+        os.execv(sys.executable, [sys.executable, "-m", "bot"])
         
     except Exception as e:
         LOGGER.critical(f"❌ Failed to restart: {e}")
@@ -135,167 +136,97 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
 async def check_and_pull_updates():
     """Check for updates and pull if available"""
     try:
-        # Verify git is available
         git_version = run_git_command("git --version")
         if "git version" not in git_version.lower():
             LOGGER.warning("Git not available")
             return False, "Git not installed", None
         
-        LOGGER.info(f"Git version: {git_version.strip()}")
+        LOGGER.info(f"Git version: {git_version}")
         
-        # Check if it's a git repo
+        # Setup git if needed
         git_dir = run_git_command("git rev-parse --git-dir")
         if "fatal" in git_dir.lower() or "not a git" in git_dir.lower():
-            # Try to initialize git repo
             LOGGER.info("Not a git repo, attempting to initialize...")
-            
             if not Config.GITHUB_REPO or not Config.GITHUB_BRANCH:
-                return False, "Not a git repo and GITHUB_REPO not configured", None
+                return False, "Repo not configured", None
             
-            # Initialize git
             run_git_command("git init")
             run_git_command(f"git remote add origin {Config.GITHUB_REPO}")
             run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
             run_git_command(f"git reset --hard origin/{Config.GITHUB_BRANCH}")
-            
             LOGGER.info("✅ Git repository initialized")
         
-        # Configure git
+        # Safe directory config
         run_git_command("git config --global --add safe.directory /app")
         run_git_command("git config pull.rebase false")
         
-        # Get current commit
-        old_commit = run_git_command("git rev-parse --short HEAD").strip()
+        old_commit = run_git_command("git rev-parse --short HEAD")
         LOGGER.info(f"Current commit: {old_commit}")
         
-        # Fetch from remote
-        safe_repo_url = sanitize_url(Config.GITHUB_REPO)
-        LOGGER.info(f"Fetching from: {safe_repo_url} (branch: {Config.GITHUB_BRANCH})")
+        # Fetch
+        safe_url = sanitize_url(Config.GITHUB_REPO)
+        LOGGER.info(f"Fetching from: {safe_url}")
         fetch_result = run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
         
-        # Check for actual errors (not just the word "error" in output)
-        # Git fetch can output "From https://..." which is normal
-        is_error = False
-        if "fatal:" in fetch_result.lower():
-            is_error = True
-        elif "error:" in fetch_result.lower() and "from https://" not in fetch_result.lower():
-            is_error = True
-        elif "could not" in fetch_result.lower():
-            is_error = True
+        if "error" in fetch_result.lower() and "from https" not in fetch_result.lower():
+             LOGGER.error(f"Fetch failed: {fetch_result}")
+             return False, "Fetch failed", fetch_result
         
-        if is_error:
-            LOGGER.error(f"Fetch failed: {fetch_result[:200]}")
-            return False, "Fetch failed", fetch_result[:100]
-        
-        LOGGER.info(f"Fetch successful")
-        
-        # Check for changes
-        diff_output = run_git_command(f"git diff --name-only HEAD origin/{Config.GITHUB_BRANCH}")
-        changed_files = [f.strip() for f in diff_output.strip().split('\n') if f.strip()]
+        # Check changes
+        diff = run_git_command(f"git diff --name-only HEAD origin/{Config.GITHUB_BRANCH}")
+        changed_files = [f.strip() for f in diff.split('\n') if f.strip()]
         
         if not changed_files:
             LOGGER.info("Already up to date")
             return False, "Already up to date", None
+            
+        LOGGER.info(f"Changes in {len(changed_files)} files")
         
-        LOGGER.info(f"Changes detected in {len(changed_files)} files")
-        
-        # Stash local changes
+        # Pull
         run_git_command("git stash")
-        
-        # Pull updates
-        LOGGER.info("Pulling updates...")
         pull_result = run_git_command(f"git pull origin {Config.GITHUB_BRANCH}")
         
-        if "fatal:" in pull_result.lower() or "error:" in pull_result.lower():
-            LOGGER.error(f"Pull failed: {pull_result[:200]}")
-            return False, "Pull failed", pull_result[:100]
+        if "error" in pull_result.lower():
+            LOGGER.error(f"Pull failed: {pull_result}")
+            return False, "Pull failed", pull_result
+            
+        new_commit = run_git_command("git rev-parse --short HEAD")
         
-        # Get new commit
-        new_commit = run_git_command("git rev-parse --short HEAD").strip()
-        LOGGER.info(f"New commit: {new_commit}")
-        
-        # Update requirements if changed
+        # Install requirements
         if "requirements.txt" in changed_files:
             LOGGER.info("Updating requirements...")
             run_git_command("pip install --no-cache-dir -r requirements.txt")
-        
-        update_info = f"📝 Updated {len(changed_files)} files\n🔖 {old_commit} → {new_commit}"
-        return True, update_info, None
+            
+        return True, f"📝 Updated {len(changed_files)} files\n🔖 {old_commit} → {new_commit}", None
         
     except Exception as e:
         LOGGER.error(f"Update check failed: {e}")
-        import traceback
-        LOGGER.error(traceback.format_exc())
         return False, "Update check failed", str(e)
 
 @Clients.bot.on_message(filters.command("restart") & filters.user(Config.OWNER_ID))
 async def restart_handler(client, message):
     """Restart bot with auto-update (Owner only)"""
     if Config.OWNER_ID == 0:
-        await message.reply_text("❌ This command is disabled (OWNER_ID not set)")
         return
     
     status = await message.reply_text("🔄 **Restarting LinkerX...**")
     
     try:
-        LOGGER.info("=" * 60)
-        LOGGER.info("RESTART COMMAND RECEIVED")
-        LOGGER.info(f"Requested by: {message.from_user.id}")
-        LOGGER.info("=" * 60)
-        
-        # Try to update code first
         await status.edit("📥 **Checking for updates...**")
-        
         updated, info, error = await check_and_pull_updates()
         
         restart_status = "success"
-        
         if updated:
-            LOGGER.info(f"✅ Code updated: {info}")
-            await status.edit(
-                f"✅ **Update Successful!**\n\n"
-                f"{info}\n\n"
-                f"🔄 Restarting with new code...\n"
-                f"⏳ Bot will be back in ~15 seconds"
-            )
+            await status.edit(f"✅ **Update Successful!**\n\n{info}\n\n🔄 Restarting...")
             restart_status = "updated"
+        elif error:
+            await status.edit(f"⚠️ **{info}**\n\n🔄 Restarting anyway...")
         else:
-            if error:
-                LOGGER.warning(f"⚠️ Update issue: {info}")
-                await status.edit(
-                    f"ℹ️ **{info}**\n\n"
-                    f"🔄 Restarting anyway...\n"
-                    f"⏳ Bot will be back in ~15 seconds"
-                )
-                # Don't mark as warning unless it's critical
-                restart_status = "success"
-            else:
-                LOGGER.info(f"ℹ️ {info}")
-                await status.edit(
-                    f"ℹ️ **{info}**\n\n"
-                    f"🔄 Restarting...\n"
-                    f"⏳ Bot will be back in ~15 seconds"
-                )
-        
+            await status.edit(f"ℹ️ **{info}**\n\n🔄 Restarting...")
+            
         await asyncio.sleep(2)
-        
-        # Perform restart with notification info
-        await perform_restart(
-            chat_id=message.chat.id,
-            message_id=status.id,
-            status=restart_status,
-            error=error
-        )
+        await perform_restart(message.chat.id, status.id, restart_status, error)
         
     except Exception as e:
-        LOGGER.error(f"❌ Restart command failed: {e}")
-        import traceback
-        LOGGER.error(traceback.format_exc())
-        try:
-            await status.edit(
-                f"❌ **Restart Failed**\n\n"
-                f"Error: `{str(e)[:150]}`\n\n"
-                f"Check logs for details."
-            )
-        except:
-            pass
+        LOGGER.error(f"Restart failed: {e}")
+        await status.edit(f"❌ **Error:** `{e}`")
