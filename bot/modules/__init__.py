@@ -1,4 +1,6 @@
+# Import all modules to register handlers
 from . import start
 from . import setup
 from . import list
-# Import sync and stats when created
+from . import sync
+from . import stats
