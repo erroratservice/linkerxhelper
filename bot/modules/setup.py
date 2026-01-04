@@ -23,49 +23,42 @@ async def setup_logic(message, chat_id, owner_id):
     LOGGER.info(f"=" * 60)
     
     try:
-        # Step 1: Check if helper is already in channel
+        # Step 1: Check helper membership
         LOGGER.info(f"[STEP 1] Checking helper membership in {chat_id}")
         is_member = await ChannelManager.check_helper_membership(chat_id)
-        LOGGER.info(f"[STEP 1] Helper membership status: {is_member}")
         
         if not is_member:
             await message.edit("➕ **Preparing helper account...**")
             LOGGER.info(f"[STEP 2] Adding helper to channel {chat_id}")
             
             try:
-                # FIX: Pass 'message' here so ChannelManager can notify user of FloodWaits
+                # Pass 'message' for FloodWait notifications
                 await ChannelManager.add_helper_to_channel(chat_id, message)
                 LOGGER.info(f"[STEP 2] ✅ Helper successfully added/promoted")
             except Exception as e:
                 LOGGER.error(f"[STEP 2] ❌ FAILED to add helper: {type(e).__name__} - {e}")
                 raise
             
-            # INCREASED DELAY: Changed from 5s to 15s to guarantee propagation
             LOGGER.info("[STEP 2] ⏳ Waiting 15s for permissions to propagate...")
             await asyncio.sleep(15)
         else:
             LOGGER.info(f"[STEP 2] Helper already in channel, skipping add")
         
-        # Step 3: Verify helper has admin rights with promote permission
-        LOGGER.info(f"[STEP 3] Verifying helper permissions in {chat_id}")
+        # Step 3: Verify helper rights
+        LOGGER.info(f"[STEP 3] Verifying helper permissions")
         try:
             helper_member = await Clients.user_app.get_chat_member(chat_id, "me")
-            
             can_promote = getattr(helper_member.privileges, "can_promote_members", False) if helper_member.privileges else False
             
             if not can_promote:
-                LOGGER.error(f"[STEP 3] ❌ Helper lacks promote permission!")
-                raise RuntimeError(
-                    "Helper account is in channel but lacks 'Add New Admins' permission.\n"
-                    "Please manually promote @HelpingYouSetup with 'Add New Admins' permission."
-                )
+                raise RuntimeError("Helper account in channel but lacks 'Add New Admins' permission.")
         except Exception as e:
-            LOGGER.error(f"[STEP 3] ❌ Failed to verify helper permissions: {e}")
+            LOGGER.error(f"[STEP 3] ❌ Failed to verify helper: {e}")
             raise
         
         # Step 4: Add bots
         await message.edit("🤖 **Adding bots...**")
-        LOGGER.info(f"[STEP 4] Starting bot installation for {chat_id}")
+        LOGGER.info(f"[STEP 4] Starting bot installation")
         
         try:
             successful, failed = await BotManager.process_bots(
@@ -75,19 +68,18 @@ async def setup_logic(message, chat_id, owner_id):
             if failed:
                 LOGGER.warning(f"[STEP 4] Failed bots: {failed}")
         except Exception as e:
-            LOGGER.error(f"[STEP 4] ❌ Bot installation failed: {type(e).__name__} - {e}")
+            LOGGER.error(f"[STEP 4] ❌ Bot installation failed: {e}")
             raise
         
-        # Step 5: Save to database
-        LOGGER.info(f"[STEP 5] Saving setup to database")
+        # Step 5: Save DB
+        LOGGER.info(f"[STEP 5] Saving setup")
         try:
             await Database.save_setup(chat_id, owner_id, successful)
-            LOGGER.info(f"[STEP 5] ✅ Database updated")
         except Exception as e:
             LOGGER.error(f"[STEP 5] ❌ Database save failed: {e}")
             raise
         
-        # Step 6: Send completion message
+        # Step 6: Completion
         text = (
             f"✅ **Setup complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
@@ -98,30 +90,36 @@ async def setup_logic(message, chat_id, owner_id):
             text += f"\n⚠️ Failed: {', '.join(failed)}"
         
         await message.edit(text)
-        LOGGER.info(f"[STEP 6] ✅ Setup completed successfully for {chat_id}")
+        LOGGER.info(f"[STEP 6] ✅ Setup completed successfully")
         LOGGER.info(f"=" * 60)
     
     except Exception as e:
-        LOGGER.error(f"=" * 60)
-        LOGGER.error(f"SETUP FAILED for channel {chat_id}")
-        LOGGER.error(f"Error type: {type(e).__name__}")
-        LOGGER.error(f"Error message: {str(e)}")
-        LOGGER.error(f"=" * 60)
+        LOGGER.error(f"SETUP FAILED: {e}")
         raise
 
 @Clients.bot.on_message(filters.command("setup") & (filters.group | filters.channel))
 async def setup_handler(client, message):
-    """Setup command handler - Works in Groups/Channels only"""
+    """Setup command handler"""
     target_chat = message.chat.id
     status = None
     
-    # OWNER ID DETECTION
+    # 1. QUEUE CHECK (Prevent duplicate requests)
+    existing_pos = queue_manager.get_position(target_chat)
+    if existing_pos:
+        await message.reply_text(
+            f"⚠️ **Request Already Queued**\n\n"
+            f"This channel is already in the queue at position **#{existing_pos}**.\n"
+            f"Please wait for the current task to finish."
+        )
+        return
+
+    # 2. OWNER ID
     owner_id = None
     if message.from_user:
         owner_id = message.from_user.id
         status = await message.reply_text("🔍 **Identifying owner...**")
     else:
-        status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner to link account...")
+        status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner...")
         try:
             found_owner = False
             async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
@@ -131,21 +129,21 @@ async def setup_handler(client, message):
                     break
             
             if not found_owner or not owner_id:
-                await status.edit("❌ **Setup Failed**\n\nCould not identify the channel owner. Please disable Anonymous Admin and try again.")
+                await status.edit("❌ **Setup Failed**\n\nCould not identify owner.")
                 return
             LOGGER.info(f"[SETUP] Anonymous admin resolved to Owner ID: {owner_id}")
         except Exception as e:
             LOGGER.error(f"[SETUP] Failed to fetch owner: {e}")
-            await status.edit("❌ **Error identifying owner.**\nPlease disable Anonymous Admin and try again.")
+            await status.edit("❌ **Error identifying owner.**")
             return
 
-    # DM Check
+    # 3. DM VERIFICATION
     try:
         await Clients.bot.send_message(
             chat_id=owner_id,
             text=(
                 f"✅ **LinkerX Setup Verification**\n\n"
-                f"Setup is initializing for channel: **{message.chat.title}**\n"
+                f"Setup is initializing for: **{message.chat.title}**\n"
                 f"🆔 `{target_chat}`"
             )
         )
@@ -154,45 +152,28 @@ async def setup_handler(client, message):
         await status.edit(
             f"⚠️ **Action Required**\n\n"
             f"I cannot message the Owner (ID: `{owner_id}`).\n"
-            f"To ensure you receive error alerts, you must start the bot first.\n\n"
-            f"👇 **Please do this:**\n"
-            f"1. [Click Here to Start Bot](https://t.me/{bot_username}?start=setup)\n"
-            f"2. Come back here and run `/setup` again."
+            f"Please start the bot first: https://t.me/{bot_username}?start=setup\n"
+            f"Then try again."
         )
         return
     except Exception as e:
-        LOGGER.error(f"[DM CHECK] Failed: {e}")
-        await status.edit(f"❌ **Verification Error:**\nUnable to verify connection with owner: `{str(e)}`")
+        await status.edit(f"❌ **Verification Error:**\n`{str(e)}`")
         return
 
     await status.edit("🔍 **Checking bot permissions...**")
     
     try:
-        LOGGER.info(f"[PERMISSION CHECK] Checking bot permissions in {target_chat}")
+        # 4. PERMISSION & ADMIN LIMIT CHECK
         member = await Clients.bot.get_chat_member(target_chat, "me")
-        
         is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
-        has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False)) if member.privileges else False
+        has_promote = bool(getattr(member.privileges, "can_promote_members", False)) if member.privileges else False
         
-        LOGGER.info(f"[PERMISSION CHECK] is_admin: {is_admin}, can_promote_members: {has_promote_flag}")
-        
-        if not is_admin:
-            LOGGER.error(f"[PERMISSION CHECK] ❌ Bot is not admin in {target_chat}")
+        if not is_admin or not has_promote:
             bot_username = await Clients.get_bot_username()
-            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} must be an admin.")
+            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} needs Admin + 'Add New Admins' rights.")
             return
         
-        if not has_promote_flag:
-            LOGGER.error(f"[PERMISSION CHECK] ❌ Bot lacks can_promote_members")
-            bot_username = await Clients.get_bot_username()
-            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} needs 'Add New Admins' rights.")
-            return
-        
-        LOGGER.info(f"[PERMISSION CHECK] ✅ Bot permissions verified")
-        
-        # -------------------------------------------------------------------------
-        # NEW: Check Admin Limit (Max 50)
-        # -------------------------------------------------------------------------
+        # 5. FETCH ADMINS (Limit Check + Completion Check)
         await status.edit("🔍 **Checking admin slots...**")
         
         current_admin_usernames = set()
@@ -203,46 +184,53 @@ async def setup_handler(client, message):
             if member.user and member.user.username:
                 current_admin_usernames.add(member.user.username.lower())
         
-        # Calculate how many NEW slots we need
-        # We only count bots that are NOT already in the admin list
-        slots_needed = 0
+        # Calculate missing bots
+        missing_bots = []
         for bot in Config.BOTS_TO_ADD:
             clean_name = bot.lstrip("@").lower()
             if clean_name not in current_admin_usernames:
-                slots_needed += 1
+                missing_bots.append(bot)
         
-        # Add buffer for Helper account (if not already there)
-        # We assume 1 extra slot needed for safety if we aren't sure
-        total_projected = current_count + slots_needed + 1 
-        
-        LOGGER.info(f"[LIMIT CHECK] Current: {current_count}, Needed: {slots_needed}, Projected: {total_projected}")
+        # CHECK 1: Is everything already done?
+        if not missing_bots:
+            await status.edit(
+                f"✅ **All bots already installed!**\n\n"
+                f"I checked the admin list and all {len(Config.BOTS_TO_ADD)} bots are present.\n"
+                f"No further action needed."
+            )
+            # We can update DB here to be safe
+            await Database.save_setup(target_chat, owner_id, Config.BOTS_TO_ADD)
+            return
+
+        # CHECK 2: Do we have enough slots?
+        slots_needed = len(missing_bots)
+        # +1 buffer for Helper if it's not already an admin
+        helper_buffer = 1 
+        total_projected = current_count + slots_needed + helper_buffer
         
         if total_projected > 50:
             excess = total_projected - 50
             await status.edit(
                 f"❌ **Admin Limit Exceeded**\n\n"
-                f"Telegram channels allow max **50** admins.\n\n"
-                f"📊 Current Admins: `{current_count}`\n"
-                f"🤖 Bots to Add: `{slots_needed}`\n"
-                f"⚠️ Projected Total: `{total_projected}`\n\n"
-                f"**Please remove {excess} admin(s) or bots and try again.**"
+                f"Telegram limit: **50** admins.\n"
+                f"📊 Current: `{current_count}`\n"
+                f"🤖 Missing Bots: `{slots_needed}`\n"
+                f"⚠️ Projected: `{total_projected}`\n\n"
+                f"**Please remove {excess} admin(s) and try again.**"
             )
             return
-        # -------------------------------------------------------------------------
-    
+            
     except UserNotParticipant:
-        LOGGER.error(f"[PERMISSION CHECK] ❌ Bot not in channel {target_chat}")
         await status.edit(f"⚠️ **Bot not in channel!**")
         return
     except Exception as e:
-        LOGGER.error(f"[PERMISSION CHECK] ❌ Error checking permissions: {type(e).__name__} - {e}")
-        await status.edit(f"❌ **Error checking permissions:**\n`{e}`")
+        LOGGER.error(f"Permission check error: {e}")
+        await status.edit(f"❌ **Error:** `{e}`")
         return
     
+    # 6. ADD TO QUEUE
     LOGGER.info(f"[QUEUE] Adding {target_chat} to processing queue")
     try:
         await queue_manager.add_to_queue(status, target_chat, owner_id, setup_logic)
-        LOGGER.info(f"[QUEUE] ✅ Added to queue successfully")
     except Exception as e:
-        LOGGER.error(f"[QUEUE] ❌ Failed to add to queue: {e}")
-        await status.edit(f"❌ **Error:** {str(e)}")
+        await status.edit(f"❌ **Queue Error:** {str(e)}")
