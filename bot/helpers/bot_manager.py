@@ -62,8 +62,8 @@ class BotManager:
                     except Exception as e:
                         LOGGER.debug(f"Add member failed ({username}): {e}")
 
-                    # Step B: Try Promoting with Retry Logic
-                    max_retries = 3
+                    # Step B: Try Promoting with Extended Retry Logic
+                    max_retries = 6  # INCREASED
                     for attempt in range(max_retries):
                         try:
                             await Clients.user_app.promote_chat_member(
@@ -76,13 +76,12 @@ class BotManager:
                             break # Success, exit retry loop
                             
                         except RightForbidden:
-                            # 403: We probably can't edit this bot because owner added it.
-                            # Check if it is ALREADY an admin.
+                            # 403: Bot is already admin (protected by owner)
                             try:
                                 m = await Clients.user_app.get_chat_member(chat_id, username)
                                 if m.status == ChatMemberStatus.ADMINISTRATOR:
                                     LOGGER.warning(f"[BOT_MANAGER] ⚠️ {username} is already admin (Owner protected). Skipping.")
-                                    success.append(username) # Count as success since it is there
+                                    success.append(username) 
                                     break
                             except:
                                 pass
@@ -92,19 +91,19 @@ class BotManager:
                             break
                             
                         except ChatAdminRequired:
-                            # 400: Helper not recognized as admin yet?
+                            # 400: Helper not recognized as admin yet
                             if attempt < max_retries - 1:
-                                LOGGER.warning(f"[BOT_MANAGER] 🔄 ChatAdminRequired for {username}, retrying in 3s...")
-                                await asyncio.sleep(3)
+                                LOGGER.warning(f"[BOT_MANAGER] 🔄 ChatAdminRequired for {username}, retrying in 5s... (Attempt {attempt+1}/{max_retries})")
+                                await asyncio.sleep(5)  # INCREASED
                             else:
                                 LOGGER.error(f"[BOT_MANAGER] ❌ Failed {username} after retries")
                                 failed.append(username)
                         
                         except FloodWait as fw:
                             LOGGER.warning(f"[BOT_MANAGER] ⏳ FloodWait {fw.value}s")
-                            await asyncio.sleep(fw.value + 1)
+                            await asyncio.sleep(fw.value + 2)
                             delay_applied = True
-                            # Don't break, retry loop continues
+                            # Retry loop continues
                             
                         except Exception as e:
                             LOGGER.error(f"[BOT_MANAGER] ❌ Error {username}: {e}")
@@ -114,11 +113,9 @@ class BotManager:
                 elif action == "remove":
                     LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Removing {username}")
                     try:
-                        # Demote
                         await Clients.user_app.promote_chat_member(
                             chat_id, username, privileges=ChatPrivileges()
                         )
-                        # Ban/Unban to remove
                         await Clients.user_app.ban_chat_member(chat_id, username)
                         await Clients.user_app.unban_chat_member(chat_id, username)
                         success.append(username)
