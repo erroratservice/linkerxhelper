@@ -1,7 +1,13 @@
 import asyncio
 from pyrogram import filters
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.errors import (
+    UserNotParticipant, 
+    ChatAdminRequired, 
+    PeerIdInvalid, 
+    UserIsBlocked, 
+    InputUserDeactivated
+)
+from pyrogram.enums import ChatMemberStatus, ChatMembersFilter
 from bot.client import Clients
 from bot.helpers.queue import queue_manager
 from bot.helpers.channel_manager import ChannelManager
@@ -87,6 +93,7 @@ async def setup_logic(message, chat_id, owner_id):
         text = (
             f"✅ **Setup complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
+            f"👑 Owner Linked: `{owner_id}`\n"
             f"🤖 Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n"
         )
         if failed:
@@ -107,25 +114,80 @@ async def setup_logic(message, chat_id, owner_id):
 @Clients.bot.on_message(filters.command("setup") & (filters.group | filters.channel))
 async def setup_handler(client, message):
     """Setup command handler - Works in Groups/Channels only"""
-    
-    # Identify the user (Owner)
-    if not message.from_user:
-        await message.reply_text("❌ Please run this command as a user (disable anonymous admin) so I can link this channel to your account.")
-        return
-        
-    owner_id = message.from_user.id
     target_chat = message.chat.id
+    status = None
     
-    LOGGER.info(f"[SETUP CMD] Received in chat {target_chat} from user {owner_id}")
+    # -------------------------------------------------------
+    # 1. OWNER ID DETECTION
+    # -------------------------------------------------------
+    owner_id = None
+    if message.from_user:
+        # Normal user or non-anonymous admin
+        owner_id = message.from_user.id
+        status = await message.reply_text("🔍 **Identifying owner...**")
+    else:
+        # Anonymous Admin case
+        status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner to link account...")
+        try:
+            # Iterate through admins to find the Owner
+            found_owner = False
+            async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
+                if member.status == ChatMemberStatus.OWNER:
+                    owner_id = member.user.id
+                    found_owner = True
+                    break
+            
+            if not found_owner or not owner_id:
+                await status.edit("❌ **Setup Failed**\n\nCould not identify the channel owner. Please disable Anonymous Admin and try again.")
+                return
+            
+            LOGGER.info(f"[SETUP] Anonymous admin resolved to Owner ID: {owner_id}")
+        except Exception as e:
+            LOGGER.error(f"[SETUP] Failed to fetch owner: {e}")
+            await status.edit("❌ **Error identifying owner.**\nPlease disable Anonymous Admin and try again.")
+            return
+
+    LOGGER.info(f"[SETUP CMD] Received in chat {target_chat} linked to owner {owner_id}")
+
+    # -------------------------------------------------------
+    # 2. VERIFY OWNER REACHABILITY (DM CHECK)
+    # -------------------------------------------------------
+    try:
+        # Try to send a verification message to the owner
+        await Clients.bot.send_message(
+            chat_id=owner_id,
+            text=(
+                f"✅ **LinkerX Setup Verification**\n\n"
+                f"Setup is initializing for channel: **{message.chat.title}**\n"
+                f"🆔 `{target_chat}`\n\n"
+                f"__You are receiving this because you are linked as the owner of this setup.__"
+            )
+        )
+    except (PeerIdInvalid, UserIsBlocked, InputUserDeactivated):
+        # User has not started the bot or blocked it
+        bot_username = await Clients.get_bot_username()
+        await status.edit(
+            f"⚠️ **Action Required**\n\n"
+            f"I cannot message the Owner (ID: `{owner_id}`).\n"
+            f"To ensure you receive error alerts and status updates, you must start the bot first.\n\n"
+            f"👇 **Please do this:**\n"
+            f"1. [Click Here to Start Bot](https://t.me/{bot_username}?start=setup)\n"
+            f"2. Come back here and run `/setup` again."
+        )
+        return
+    except Exception as e:
+        LOGGER.error(f"[DM CHECK] Failed: {e}")
+        await status.edit(f"❌ **Verification Error:**\nUnable to verify connection with owner: `{str(e)}`")
+        return
+
+    await status.edit("🔍 **Checking bot permissions...**")
     
-    status = await message.reply_text("🔍 **Checking bot permissions...**")
-    
-    # Check bot permissions with detailed logging
+    # -------------------------------------------------------
+    # 3. PERMISSION CHECKS
+    # -------------------------------------------------------
     try:
         LOGGER.info(f"[PERMISSION CHECK] Checking bot permissions in {target_chat}")
         member = await Clients.bot.get_chat_member(target_chat, "me")
-        LOGGER.info(f"[PERMISSION CHECK] Bot status: {member.status}")
-        LOGGER.info(f"[PERMISSION CHECK] Bot privileges: {member.privileges}")
         
         # Check if Admin or Owner
         is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
@@ -159,8 +221,6 @@ async def setup_handler(client, message):
         LOGGER.info(f"[PERMISSION CHECK] ✅ Bot permissions verified")
     
     except UserNotParticipant:
-        # This shouldn't theoretically happen if the bot is replying to a command in the channel, 
-        # but safe to handle.
         LOGGER.error(f"[PERMISSION CHECK] ❌ Bot not in channel {target_chat}")
         await status.edit(
             f"⚠️ **Bot not in channel!**\n\n"
