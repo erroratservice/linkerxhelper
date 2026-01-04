@@ -5,7 +5,8 @@ from pyrogram.errors import (
     ChatAdminRequired, 
     PeerIdInvalid, 
     UserIsBlocked, 
-    InputUserDeactivated
+    InputUserDeactivated,
+    ChatWriteForbidden
 )
 from pyrogram.enums import ChatMemberStatus, ChatMembersFilter
 from bot.client import Clients
@@ -104,38 +105,52 @@ async def setup_handler(client, message):
     status = None
     
     # 1. QUEUE CHECK
-    existing_pos = queue_manager.get_position(target_chat)
-    if existing_pos:
-        await message.reply_text(
-            f"⚠️ **Request Already Queued**\n\n"
-            f"This channel is already in the queue at position **#{existing_pos}**.\n"
-            f"Please wait for the current task to finish."
-        )
+    try:
+        existing_pos = queue_manager.get_position(target_chat)
+        if existing_pos:
+            await message.reply_text(
+                f"⚠️ **Request Already Queued**\n\n"
+                f"This channel is already in the queue at position **#{existing_pos}**.\n"
+                f"Please wait for the current task to finish."
+            )
+            return
+    except (ChatAdminRequired, ChatWriteForbidden):
+        LOGGER.error(f"[SETUP] ❌ Bot lacks Admin/Write rights in {target_chat}")
+        return
+    except Exception as e:
+        LOGGER.error(f"[SETUP] Queue check failed: {e}")
         return
 
-    # 2. OWNER ID
+    # 2. OWNER ID & INITIAL REPLY
     owner_id = None
-    if message.from_user:
-        owner_id = message.from_user.id
-        status = await message.reply_text("🔍 **Identifying owner...**")
-    else:
-        status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner...")
-        try:
-            found_owner = False
-            async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
-                if member.status == ChatMemberStatus.OWNER:
-                    owner_id = member.user.id
-                    found_owner = True
-                    break
-            
-            if not found_owner or not owner_id:
-                await status.edit("❌ **Setup Failed**\n\nCould not identify owner.")
+    try:
+        if message.from_user:
+            owner_id = message.from_user.id
+            status = await message.reply_text("🔍 **Identifying owner...**")
+        else:
+            status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner...")
+            try:
+                found_owner = False
+                async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
+                    if member.status == ChatMemberStatus.OWNER:
+                        owner_id = member.user.id
+                        found_owner = True
+                        break
+                
+                if not found_owner or not owner_id:
+                    await status.edit("❌ **Setup Failed**\n\nCould not identify owner.")
+                    return
+                LOGGER.info(f"[SETUP] Anonymous admin resolved to Owner ID: {owner_id}")
+            except Exception as e:
+                LOGGER.error(f"[SETUP] Failed to fetch owner: {e}")
+                await status.edit("❌ **Error identifying owner.**")
                 return
-            LOGGER.info(f"[SETUP] Anonymous admin resolved to Owner ID: {owner_id}")
-        except Exception as e:
-            LOGGER.error(f"[SETUP] Failed to fetch owner: {e}")
-            await status.edit("❌ **Error identifying owner.**")
-            return
+    except (ChatAdminRequired, ChatWriteForbidden):
+        LOGGER.error(f"[SETUP] ❌ CRASH PREVENTED: Bot is not Admin in {target_chat}, cannot reply.")
+        return
+    except Exception as e:
+        LOGGER.error(f"[SETUP] Initial reply failed: {e}")
+        return
 
     # 3. DM VERIFICATION
     try:
@@ -165,12 +180,28 @@ async def setup_handler(client, message):
     try:
         # 4. PERMISSION & ADMIN LIMIT CHECK
         member = await Clients.bot.get_chat_member(target_chat, "me")
-        is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
-        has_promote = bool(getattr(member.privileges, "can_promote_members", False)) if member.privileges else False
         
-        if not is_admin or not has_promote:
+        # Check privileges object existence
+        privs = member.privileges if member.privileges else None
+        
+        is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+        has_promote = getattr(privs, "can_promote_members", False) if privs else False
+        has_invite = getattr(privs, "can_invite_users", False) if privs else False
+        
+        # Check for ALL 3 required permissions
+        if not is_admin or not has_promote or not has_invite:
             bot_username = await Clients.get_bot_username()
-            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} needs Admin + 'Add New Admins' rights.")
+            
+            missing = []
+            if not is_admin: missing.append("Admin Status")
+            if not has_promote: missing.append("Add New Admins")
+            if not has_invite: missing.append("Invite Users via Link")
+            
+            await status.edit(
+                f"⚠️ **Missing Permissions!**\n\n"
+                f"@{bot_username} requires the following rights:\n"
+                f"❌ " + "\n❌ ".join(missing)
+            )
             return
         
         # 5. FETCH ADMINS (Limit Check + Completion Check)
