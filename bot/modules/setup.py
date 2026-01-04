@@ -88,7 +88,6 @@ async def setup_logic(message, chat_id, owner_id):
             f"✅ **Setup complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
             f"🤖 Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n"
-            f"📊 Helper active in: {active_count}/{Config.MAX_USER_CHANNELS} channels\n"
         )
         if failed:
             text += f"\n⚠️ Failed: {', '.join(failed)}"
