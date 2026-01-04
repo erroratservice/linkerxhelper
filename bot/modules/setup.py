@@ -103,7 +103,7 @@ async def setup_handler(client, message):
     target_chat = message.chat.id
     status = None
     
-    # 1. QUEUE CHECK (Prevent duplicate requests)
+    # 1. QUEUE CHECK
     existing_pos = queue_manager.get_position(target_chat)
     if existing_pos:
         await message.reply_text(
