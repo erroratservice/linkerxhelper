@@ -49,86 +49,97 @@ class ChannelManager:
         LOGGER.info(f"[ADD_HELPER] Helper user ID: {helper_id}")
         
         # Check if already member with proper permissions
+        is_already_member = False
+        needs_promotion = False
+        
         try:
             LOGGER.info(f"[ADD_HELPER] Checking existing membership")
             member = await Clients.user_app.get_chat_member(chat_id, "me")
             LOGGER.info(f"[ADD_HELPER] Existing status: {member.status}")
+            LOGGER.info(f"[ADD_HELPER] Existing privileges: {member.privileges}")
             
-            if member.status in ("member", "administrator", "creator"):
-                if member.status in ("administrator", "creator"):
-                    can_promote = getattr(member.privileges, "can_promote_members", False) if member.privileges else False
-                    LOGGER.info(f"[ADD_HELPER] Is admin, can_promote: {can_promote}")
-                    
-                    if can_promote or member.status == "creator":
-                        await Database.update_channel_membership(chat_id, True)
-                        LOGGER.info(f"[ADD_HELPER] ✅ Already admin with promote rights, done")
-                        return True
-                    else:
-                        LOGGER.info(f"[ADD_HELPER] Is admin but needs promote permission, will re-promote")
+            if member.status in ("administrator", "creator"):
+                is_already_member = True
+                can_promote = getattr(member.privileges, "can_promote_members", False) if member.privileges else False
+                LOGGER.info(f"[ADD_HELPER] Is admin, can_promote: {can_promote}")
+                
+                if can_promote or member.status == "creator":
+                    # Already has all needed permissions
+                    await Database.update_channel_membership(chat_id, True)
+                    LOGGER.info(f"[ADD_HELPER] ✅ Already admin with promote rights, done")
+                    return True
                 else:
-                    LOGGER.info(f"[ADD_HELPER] Is member but not admin, needs promotion")
+                    # Admin but needs promote permission
+                    needs_promotion = True
+                    LOGGER.info(f"[ADD_HELPER] Is admin but needs promote permission")
+            
+            elif member.status == "member":
+                is_already_member = True
+                needs_promotion = True
+                LOGGER.info(f"[ADD_HELPER] Is regular member, needs promotion")
+        
         except UserNotParticipant:
             LOGGER.info(f"[ADD_HELPER] Not in channel, needs to join")
         except Exception as e:
             LOGGER.error(f"[ADD_HELPER] Error checking membership: {e}")
         
-        # Manage capacity
-        await ChannelManager.manage_capacity(chat_id)
-        
-        # Try to add helper
-        helper_added = False
-        
-        # Method 1: Direct add
-        LOGGER.info(f"[ADD_HELPER] Attempting direct add via bot.add_chat_members()")
-        try:
-            await Clients.bot.add_chat_members(chat_id, helper_id)
-            helper_added = True
-            LOGGER.info(f"[ADD_HELPER] ✅ Direct add successful")
-            await asyncio.sleep(2)
-        except UserAlreadyParticipant:
-            helper_added = True
-            LOGGER.info(f"[ADD_HELPER] Helper already in channel")
-        except ChatAdminRequired as e:
-            LOGGER.error(f"[ADD_HELPER] ❌ ChatAdminRequired: {e}")
-            LOGGER.info(f"[ADD_HELPER] Trying invite link method...")
-        except Exception as e:
-            LOGGER.error(f"[ADD_HELPER] ❌ Direct add failed: {type(e).__name__} - {e}")
-            LOGGER.info(f"[ADD_HELPER] Trying invite link method...")
-        
-        # Method 2: Invite link
-        if not helper_added:
-            LOGGER.info(f"[ADD_HELPER] Creating invite link")
+        # If not a member at all, need to join first
+        if not is_already_member:
+            # Manage capacity
+            await ChannelManager.manage_capacity(chat_id)
+            
+            # Try to join the channel
+            LOGGER.info(f"[ADD_HELPER] Attempting to join channel")
+            
+            # Method 1: Direct add via bot
             try:
-                invite_link = await Clients.bot.export_chat_invite_link(chat_id)
-                LOGGER.info(f"[ADD_HELPER] Invite link created: {invite_link}")
+                LOGGER.info(f"[ADD_HELPER] Trying bot.add_chat_members()")
+                await Clients.bot.add_chat_members(chat_id, helper_id)
+                LOGGER.info(f"[ADD_HELPER] ✅ Direct add successful")
+                is_already_member = True
+                needs_promotion = True
+                await asyncio.sleep(2)
+            except UserAlreadyParticipant:
+                LOGGER.info(f"[ADD_HELPER] Helper already in channel")
+                is_already_member = True
+                needs_promotion = True
+            except Exception as e:
+                LOGGER.warning(f"[ADD_HELPER] Direct add failed: {type(e).__name__} - {e}")
+                LOGGER.info(f"[ADD_HELPER] Trying invite link method...")
                 
+                # Method 2: Invite link
                 try:
-                    LOGGER.info(f"[ADD_HELPER] Helper joining via link")
-                    await Clients.user_app.join_chat(invite_link)
-                    helper_added = True
-                    LOGGER.info(f"[ADD_HELPER] ✅ Helper joined via invite link")
-                    await asyncio.sleep(2)
-                except InviteRequestSent:
-                    LOGGER.error(f"[ADD_HELPER] ❌ Join request sent (approval required)")
+                    invite_link = await Clients.bot.export_chat_invite_link(chat_id)
+                    LOGGER.info(f"[ADD_HELPER] Invite link created: {invite_link}")
+                    
+                    try:
+                        await Clients.user_app.join_chat(invite_link)
+                        LOGGER.info(f"[ADD_HELPER] ✅ Helper joined via invite link")
+                        is_already_member = True
+                        needs_promotion = True
+                        await asyncio.sleep(2)
+                    except UserAlreadyParticipant:
+                        LOGGER.info(f"[ADD_HELPER] Helper already participant")
+                        is_already_member = True
+                        needs_promotion = True
+                    except InviteRequestSent:
+                        LOGGER.error(f"[ADD_HELPER] ❌ Join request sent (approval required)")
+                        raise RuntimeError(
+                            "⚠️ Channel requires join approval.\n"
+                            "Please manually approve @HelpingYouSetup or disable join approval."
+                        )
+                except ChatAdminRequired:
+                    LOGGER.error(f"[ADD_HELPER] ❌ Bot can't create invite links")
                     raise RuntimeError(
-                        "⚠️ Channel requires join approval.\n"
-                        "Please manually approve @HelpingYouSetup or disable join approval."
+                        "Bot lacks permission to create invite links.\n"
+                        "Ensure bot has 'Invite Users via Link' permission."
                     )
                 except Exception as e:
-                    LOGGER.error(f"[ADD_HELPER] ❌ Failed to join via link: {type(e).__name__} - {e}")
-                    raise
-            except ChatAdminRequired:
-                LOGGER.error(f"[ADD_HELPER] ❌ Bot can't create invite links (ChatAdminRequired)")
-                raise RuntimeError(
-                    "Bot lacks permission to create invite links.\n"
-                    "Ensure bot has 'Invite Users via Link' permission."
-                )
-            except Exception as e:
-                LOGGER.error(f"[ADD_HELPER] ❌ Invite link method failed: {type(e).__name__} - {e}")
-                raise RuntimeError(f"Could not add helper to channel: {str(e)}")
+                    LOGGER.error(f"[ADD_HELPER] ❌ Invite link method failed: {type(e).__name__} - {e}")
+                    raise RuntimeError(f"Could not add helper to channel: {str(e)}")
         
-        # Promote helper to admin
-        if helper_added:
+        # Now promote helper to admin (if needed)
+        if needs_promotion:
             LOGGER.info(f"[PROMOTE_HELPER] Getting bot's privileges to match")
             try:
                 bot_member = await Clients.bot.get_chat_member(chat_id, "me")
@@ -149,8 +160,7 @@ class ChannelManager:
                     can_manage_video_chats=getattr(bot_privs, "can_manage_video_chats", False)
                 )
                 
-                LOGGER.info(f"[PROMOTE_HELPER] Helper privileges to grant: {helper_privileges}")
-                LOGGER.info(f"[PROMOTE_HELPER] Promoting helper to admin")
+                LOGGER.info(f"[PROMOTE_HELPER] Promoting helper with bot-matched privileges")
                 
                 await Clients.bot.promote_chat_member(
                     chat_id, 
@@ -160,7 +170,7 @@ class ChannelManager:
                 LOGGER.info(f"[PROMOTE_HELPER] ✅ Helper promoted")
                 await asyncio.sleep(2)
                 
-                # Verify
+                # Verify promotion
                 LOGGER.info(f"[PROMOTE_HELPER] Verifying promotion")
                 helper_member = await Clients.user_app.get_chat_member(chat_id, "me")
                 can_promote = getattr(helper_member.privileges, "can_promote_members", False) if helper_member.privileges else False
@@ -186,6 +196,12 @@ class ChannelManager:
             except Exception as e:
                 LOGGER.error(f"[PROMOTE_HELPER] ❌ Failed: {type(e).__name__} - {e}")
                 raise RuntimeError(f"Failed to promote helper: {str(e)}")
+        
+        # If we reach here with is_already_member but no promotion needed
+        if is_already_member:
+            await Database.update_channel_membership(chat_id, True)
+            LOGGER.info(f"[ADD_HELPER] ✅ Helper already properly configured")
+            return True
         
         return False
     
