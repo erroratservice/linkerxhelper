@@ -2,3 +2,4 @@ pyrotgfork
 tgcrypto
 aiohttp
 motor
+dnspython
