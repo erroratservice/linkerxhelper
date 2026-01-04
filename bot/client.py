@@ -1,5 +1,6 @@
 from pyrogram import Client
 from config import Config
+from bot.utils.logger import LOGGER
 
 class Clients:
     bot = None
@@ -33,8 +34,11 @@ class Clients:
         try:
             me = await Clients.bot.get_me()
             Clients._bot_username_cache = me.username
+            if Clients._bot_username_cache:
+                LOGGER.info(f"✅ Bot username: @{Clients._bot_username_cache}")
             return Clients._bot_username_cache
-        except Exception:
+        except Exception as e:
+            LOGGER.error(f"Failed to get bot username: {e}")
             return None
     
     @staticmethod
@@ -45,8 +49,11 @@ class Clients:
         try:
             me = await Clients.user_app.get_me()
             Clients._helper_username_cache = me.username
+            if Clients._helper_username_cache:
+                LOGGER.info(f"✅ Helper username: @{Clients._helper_username_cache}")
             return Clients._helper_username_cache
-        except Exception:
+        except Exception as e:
+            LOGGER.error(f"Failed to get helper username: {e}")
             return None
     
     @staticmethod
@@ -55,5 +62,6 @@ class Clients:
         try:
             me = await Clients.user_app.get_me()
             return me.id
-        except Exception:
+        except Exception as e:
+            LOGGER.error(f"Failed to get helper user ID: {e}")
             return None
