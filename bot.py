@@ -38,6 +38,13 @@ URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
 _bot_username_cache = None
 _helper_username_cache = None
 
+# Global clients (will be initialized in main)
+bot = None
+user_app = None
+mongo_client = None
+db = None
+channels_col = None
+
 # Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -84,14 +91,9 @@ validate_env()
 logger.info(f"🛡️ Safety delays: {SYNC_ACTION_DELAY}s between bots, {SYNC_CHANNEL_DELAY}s between channels")
 logger.info(f"📊 Max helper user channels: {MAX_USER_CHANNELS}")
 
-# --- DATABASE (Motor) ---
-
-mongo_client = AsyncIOMotorClient(MONGO_URL)
-db = mongo_client["linkerx_db"]
-channels_col = db["channels"]
-
 
 async def init_db():
+    global mongo_client, db, channels_col
     try:
         await channels_col.create_index("channel_id", unique=True)
         await channels_col.create_index("owner_id")
@@ -101,12 +103,6 @@ async def init_db():
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
         raise
-
-
-# --- PYROGRAM CLIENTS ---
-
-bot = Client("bot_client", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-user_app = Client("user_client", api_id=API_ID, api_hash=API_HASH, session_string=USER_SESSION, in_memory=True)
 
 
 # --- USERNAME HELPERS ---
@@ -387,7 +383,6 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
 
 async def setup_logic(message, target_chat, owner_id):
     try:
-        # Ensure helper is in channel (or join respecting capacity)
         is_member = await check_user_membership(target_chat)
         if not is_member:
             await message.edit("➕ **Preparing helper account...**")
@@ -479,7 +474,6 @@ async def setup_handler(client, message):
 
     status = await message.reply_text("🔍 **Checking bot permissions...**")
 
-    # Check bot permissions
     try:
         member = await bot.get_chat_member(target_chat, "me")
         logger.info(f"Bot member in {target_chat}: status={member.status}, privileges={member.privileges}")
@@ -714,7 +708,18 @@ async def ping():
 # --- MAIN ---
 
 async def main():
+    global bot, user_app, mongo_client, db, channels_col
+    
     try:
+        # Initialize clients AFTER event loop is set
+        bot = Client("bot_client", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+        user_app = Client("user_client", api_id=API_ID, api_hash=API_HASH, session_string=USER_SESSION, in_memory=True)
+        
+        # Initialize MongoDB
+        mongo_client = AsyncIOMotorClient(MONGO_URL)
+        db = mongo_client["linkerx_db"]
+        channels_col = db["channels"]
+        
         await start_web()
         await init_db()
 
@@ -745,31 +750,22 @@ async def main():
     finally:
         logger.info("Shutting down...")
         try:
-            await bot.stop()
+            if bot:
+                await bot.stop()
         except:
             pass
         try:
-            await user_app.stop()
+            if user_app:
+                await user_app.stop()
         except:
             pass
         try:
-            mongo_client.close()  # Motor's close() is synchronous
+            if mongo_client:
+                mongo_client.close()
         except:
             pass
         logger.info("Shutdown complete")
 
 
-# --- EVENT LOOP FIX ---
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("Program terminated by user")
-    finally:
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except:
-            pass
-        loop.close()
+    asyncio.run(main())
