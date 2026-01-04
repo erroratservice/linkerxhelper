@@ -2,12 +2,31 @@ import asyncio
 from pyrogram.errors import FloodWait
 from bot.utils.logger import LOGGER
 from bot.helpers.database import Database
+from config import Config
 
 class QueueManager:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.waiting_users = []
     
+    def calculate_wait(self, position):
+        """
+        Calculate estimated wait time dynamically.
+        Base Overhead: 20s (15s perm wait + 5s join/network)
+        Per Bot: 3s (2s fixed delay + 1s buffer for retries/network)
+        """
+        bots_count = len(Config.BOTS_TO_ADD)
+        time_per_user = 20 + (bots_count * 3)
+        
+        # Calculate total wait
+        total_seconds = position * time_per_user
+        
+        # Format nice string
+        if total_seconds < 60:
+            return f"{total_seconds}s"
+        else:
+            return f"{total_seconds // 60}m {total_seconds % 60}s"
+
     async def sync_db(self):
         """Sync current queue state to database for crash recovery"""
         snapshot = [
@@ -29,12 +48,17 @@ class QueueManager:
         # SAVE TO DB INSTANTLY (Crash Proof)
         await self.sync_db()
         
-        pos = len(self.waiting_users)
+        # Position is 0-indexed in list, so 1st person is pos 0 (active), 
+        # 2nd person is pos 1 (waiting 1 turn)
+        queue_len = len(self.waiting_users)
+        wait_pos = queue_len - 1  # Number of people ahead
+        
+        est_wait = self.calculate_wait(wait_pos)
         
         await message.edit(
             f"⏳ **Added to Queue**\n"
-            f"📍 Position: #{pos}\n"
-            f"⏱️ Estimated wait: ~{(pos - 1) * 30}s\n"
+            f"📍 Position: #{queue_len}\n"
+            f"⏱️ Est. Wait: ~{est_wait}\n"
             f"Please wait..."
         )
         await self.queue.put(data)
@@ -52,10 +76,11 @@ class QueueManager:
                 if i == 0:
                     await req["msg"].edit("🔄 **You're Next!**\n⚙️ Starting setup now...")
                 else:
+                    est_wait = self.calculate_wait(i)
                     await req["msg"].edit(
                         f"⏳ **Queue Position: #{i+1}**\n"
                         f"📊 {i} user(s) ahead of you\n"
-                        f"⏱️ Estimated wait: ~{i*30}s"
+                        f"⏱️ Est. Wait: ~{est_wait}"
                     )
                 
                 # STAGGER UPDATES: Sleep between edits to prevent floodwait
