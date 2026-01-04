@@ -9,16 +9,14 @@ async def start_handler(client, message):
     bot_mention = f"@{bot_username}" if bot_username else "this bot"
     
     await message.reply_text(
-        f"👋 **Welcome to LinkerX!**\n\n"
+        f"👋 **Welcome to LinkerX Setup Service**\n\n"
         f"I can automatically configure your channel with required bots.\n\n"
         f"**🚀 Setup Steps:**\n"
         f"1️⃣ Add {bot_mention} to your channel\n"
         f"2️⃣ Promote it to admin with **Add New Admins** permission\n"
-        f"3️⃣ Get channel ID from @username_to_id_bot\n"
-        f"4️⃣ Run `/setup <channel_id>`\n\n"
-        f"**Example:** `/setup -100123456789`\n\n"
+        f"3️⃣ Go to your channel and run `/setup`\n\n"
         f"**📋 Available Commands:**\n"
-        f"• `/setup <channel_id>` - Setup channel\n"
         f"• `/list` - View your channels\n"
-        f"• `/help` - Show this message"
+        f"• `/help` - Show this message\n\n"
+        f"__Note: The setup command only works directly inside channels or groups.__"
     )
