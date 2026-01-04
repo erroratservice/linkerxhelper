@@ -1,20 +1,38 @@
-# Use a lightweight Python image
 FROM python:3.11-slim
 
-# Set the working directory inside the container
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
 WORKDIR /app
 
-# Copy the requirements file
+# Copy requirements first (for better caching)
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy application code
 COPY . .
 
-# Expose port 8080 (Standard for Render)
+# Create non-root user for security
+RUN useradd -m -u 1000 botuser && \
+    chown -R botuser:botuser /app
+
+# Switch to non-root user
+USER botuser
+
+# Expose port (default 8080, can be overridden by PORT env var)
 EXPOSE 8080
 
-# Command to run the bot
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+
+# Run bot
 CMD ["python", "bot.py"]
