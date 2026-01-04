@@ -7,9 +7,6 @@ from bot.helpers.queue import queue_manager
 from bot.utils.logger import LOGGER
 from pyrogram import idle
 
-# Import all command modules to register handlers
-from bot.modules import *
-
 async def main():
     """Main entry point for LinkerX bot"""
     try:
@@ -19,8 +16,13 @@ async def main():
         LOGGER.info(f"🛡️ Safety delays: {Config.SYNC_ACTION_DELAY}s between bots, {Config.SYNC_CHANNEL_DELAY}s between channels")
         LOGGER.info(f"📊 Max helper user channels: {Config.MAX_USER_CHANNELS} (spam protection)")
         
-        # Initialize Pyrogram clients
+        # Initialize Pyrogram clients FIRST
         Clients.initialize()
+        LOGGER.info("✅ Clients initialized")
+        
+        # NOW import modules (decorators will work because Clients.bot exists)
+        from bot.modules import start, setup, list, sync, stats
+        LOGGER.info("✅ Command modules loaded")
         
         # Initialize database
         await Database.initialize()
