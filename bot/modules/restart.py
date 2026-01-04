@@ -32,63 +32,65 @@ async def send_restart_notification():
         # Wait for everything to stabilize
         await asyncio.sleep(5)
         
+        # 1. Check for Manual Restart Info (The Owner)
         restart_info = await Database.get_restart_info()
-        if not restart_info:
-            LOGGER.info("No restart notification to send")
-            return
+        if restart_info:
+            chat_id = restart_info.get("chat_id")
+            message_id = restart_info.get("message_id")
+            status = restart_info.get("status")
+            error = restart_info.get("error")
+            
+            if chat_id and message_id:
+                if status == "success":
+                    text = "✅ **Restart Successful!**\n\n🚀 LinkerX is back online\n⏱️ All systems operational"
+                elif status == "updated":
+                    text = "✅ **Restart Successful!**\n\n📥 Code updated from GitHub\n🚀 LinkerX is back online"
+                else:
+                    text = f"⚠️ **Restarted with warnings**\n\n🚀 LinkerX is back online\n⚠️ Note: {error}"
+                
+                try:
+                    await Clients.bot.edit_message_text(chat_id, message_id, text)
+                    LOGGER.info(f"✅ Restart notification sent to {chat_id}")
+                except Exception as e:
+                    LOGGER.error(f"Failed to edit restart message: {e}")
+                    try:
+                        await Clients.bot.send_message(chat_id, text)
+                    except:
+                        pass
+
+        # 2. Check for CRASHED/PENDING Queue Users
+        # This handles users who were waiting when the server crashed or restarted
+        persistent_queue = await Database.get_queue_state()
         
-        chat_id = restart_info.get("chat_id")
-        message_id = restart_info.get("message_id")
-        status = restart_info.get("status")
-        error = restart_info.get("error")
-        
-        if not chat_id or not message_id:
-            LOGGER.warning("Incomplete restart info, cannot send notification")
-            return
-        
-        # Prepare notification message
-        if status == "success":
-            text = (
-                "✅ **Restart Successful!**\n\n"
-                "🚀 LinkerX is back online\n"
-                "⏱️ All systems operational"
-            )
-        elif status == "updated":
-            text = (
-                "✅ **Restart Successful!**\n\n"
-                "📥 Code updated from GitHub\n"
-                "🚀 LinkerX is back online\n"
-                "⏱️ All systems operational"
-            )
-        else:
-            text = (
-                "⚠️ **Restarted with warnings**\n\n"
-                "🚀 LinkerX is back online\n"
-                f"⚠️ Note: {error or 'Update check had issues'}"
-            )
-        
-        # Send notification
-        try:
-            await Clients.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text
-            )
-            LOGGER.info(f"✅ Restart notification sent to {chat_id}")
-        except Exception as e:
-            LOGGER.error(f"Failed to edit restart message: {e}")
-            try:
-                await Clients.bot.send_message(chat_id, text)
-            except:
-                pass
-    
+        if persistent_queue:
+            LOGGER.info(f"🔔 Found {len(persistent_queue)} users from previous session (Crash recovery)")
+            
+            for user in persistent_queue:
+                try:
+                    target_chat = user.get("chat_id")
+                    if target_chat:
+                        await Clients.bot.send_message(
+                            chat_id=target_chat,
+                            text=(
+                                "⚠️ **System Restarted**\n\n"
+                                "The bot restarted (possible server crash or update) while you were in the queue.\n"
+                                "Please run `/setup` again to resume."
+                            )
+                        )
+                        await asyncio.sleep(0.5) # Rate limit
+                except Exception as e:
+                    LOGGER.warning(f"Failed to notify pending user {user.get('chat_id')}: {e}")
+            
+            # Clear the queue state now that we've notified them
+            await Database.clear_queue_state()
+
     except Exception as e:
         LOGGER.error(f"Failed to send restart notification: {e}")
 
 async def perform_restart(chat_id, message_id, status="success", error=None):
     """Perform the actual restart with safe shutdown"""
     try:
-        # Save restart info
+        # Save restart info (Owner)
         await Database.save_restart_info(chat_id, message_id, status, error)
         
         LOGGER.info("=" * 60)
@@ -104,7 +106,7 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         except Exception as e:
             LOGGER.error(f"Error stopping user client: {e}")
         
-        # Stop bot client (FIXED: Properly awaited)
+        # Stop bot client
         LOGGER.info("Stopping bot client...")
         try:
             if Clients.bot.is_connected:
@@ -138,15 +140,11 @@ async def check_and_pull_updates():
     try:
         git_version = run_git_command("git --version")
         if "git version" not in git_version.lower():
-            LOGGER.warning("Git not available")
             return False, "Git not installed", None
-        
-        LOGGER.info(f"Git version: {git_version}")
         
         # Setup git if needed
         git_dir = run_git_command("git rev-parse --git-dir")
         if "fatal" in git_dir.lower() or "not a git" in git_dir.lower():
-            LOGGER.info("Not a git repo, attempting to initialize...")
             if not Config.GITHUB_REPO or not Config.GITHUB_BRANCH:
                 return False, "Repo not configured", None
             
@@ -154,53 +152,36 @@ async def check_and_pull_updates():
             run_git_command(f"git remote add origin {Config.GITHUB_REPO}")
             run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
             run_git_command(f"git reset --hard origin/{Config.GITHUB_BRANCH}")
-            LOGGER.info("✅ Git repository initialized")
         
-        # Safe directory config
         run_git_command("git config --global --add safe.directory /app")
         run_git_command("git config pull.rebase false")
         
         old_commit = run_git_command("git rev-parse --short HEAD")
-        LOGGER.info(f"Current commit: {old_commit}")
-        
-        # Fetch
         safe_url = sanitize_url(Config.GITHUB_REPO)
         LOGGER.info(f"Fetching from: {safe_url}")
-        fetch_result = run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
         
-        if "error" in fetch_result.lower() and "from https" not in fetch_result.lower():
-             LOGGER.error(f"Fetch failed: {fetch_result}")
-             return False, "Fetch failed", fetch_result
+        run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
         
-        # Check changes
         diff = run_git_command(f"git diff --name-only HEAD origin/{Config.GITHUB_BRANCH}")
         changed_files = [f.strip() for f in diff.split('\n') if f.strip()]
         
         if not changed_files:
-            LOGGER.info("Already up to date")
             return False, "Already up to date", None
             
-        LOGGER.info(f"Changes in {len(changed_files)} files")
-        
-        # Pull
         run_git_command("git stash")
         pull_result = run_git_command(f"git pull origin {Config.GITHUB_BRANCH}")
         
         if "error" in pull_result.lower():
-            LOGGER.error(f"Pull failed: {pull_result}")
             return False, "Pull failed", pull_result
             
         new_commit = run_git_command("git rev-parse --short HEAD")
         
-        # Install requirements
         if "requirements.txt" in changed_files:
-            LOGGER.info("Updating requirements...")
             run_git_command("pip install --no-cache-dir -r requirements.txt")
             
         return True, f"📝 Updated {len(changed_files)} files\n🔖 {old_commit} → {new_commit}", None
         
     except Exception as e:
-        LOGGER.error(f"Update check failed: {e}")
         return False, "Update check failed", str(e)
 
 @Clients.bot.on_message(filters.command("restart") & filters.user(Config.OWNER_ID))
