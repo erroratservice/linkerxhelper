@@ -140,6 +140,38 @@ class Database:
             LOGGER.error(f"Error getting stats: {e}")
             return None
     
+    # --- QUEUE PERSISTENCE FOR CRASH HANDLING ---
+    @staticmethod
+    async def update_queue_state(queue_data):
+        """Save the current queue list to DB (Crash Proofing)"""
+        try:
+            await Database.db["system_state"].update_one(
+                {"_id": "queue_state"},
+                {"$set": {"users": queue_data, "updated_at": datetime.utcnow()}},
+                upsert=True
+            )
+        except Exception as e:
+            LOGGER.error(f"Failed to sync queue state: {e}")
+
+    @staticmethod
+    async def get_queue_state():
+        """Get the queue list saved before a crash"""
+        try:
+            doc = await Database.db["system_state"].find_one({"_id": "queue_state"})
+            return doc.get("users", []) if doc else []
+        except Exception as e:
+            LOGGER.error(f"Failed to get queue state: {e}")
+            return []
+
+    @staticmethod
+    async def clear_queue_state():
+        """Clear queue state after notifying users"""
+        try:
+            await Database.db["system_state"].delete_one({"_id": "queue_state"})
+        except Exception as e:
+            LOGGER.error(f"Failed to clear queue state: {e}")
+
+    # --- RESTART INFO ---
     @staticmethod
     async def save_restart_info(chat_id, message_id, status, error=None):
         try:
