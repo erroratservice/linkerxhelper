@@ -28,12 +28,16 @@ class QueueManager:
         else:
             return f"{total_seconds // 60}m {total_seconds % 60}s"
 
-    async def sync_db(self):
-        """Sync current queue state to database for crash recovery"""
-        snapshot = [
+    def get_snapshot(self):
+        """Get a list of waiting chat IDs to save before restart"""
+        return [
             {"chat_id": user["chat_id"], "owner_id": user["owner_id"]} 
             for user in self.waiting_users
         ]
+
+    async def sync_db(self):
+        """Sync current queue state to database for crash recovery"""
+        snapshot = self.get_snapshot()
         await Database.update_queue_state(snapshot)
 
     async def add_to_queue(self, message, target_chat, owner_id, handler):
