@@ -28,7 +28,6 @@ class Database:
     
     @staticmethod
     async def get_active_channel_count():
-        """Get count of channels where helper is active"""
         try:
             return await Database.channels.count_documents({"user_is_member": True})
         except Exception as e:
@@ -37,7 +36,6 @@ class Database:
     
     @staticmethod
     async def get_oldest_channel(exclude_id=None):
-        """Get oldest active channel"""
         query = {"user_is_member": True}
         if exclude_id:
             query["channel_id"] = {"$ne": exclude_id}
@@ -48,7 +46,6 @@ class Database:
     
     @staticmethod
     async def get_all_channels():
-        """Get all channels"""
         try:
             return await Database.channels.find({}).to_list(length=None)
         except Exception as e:
@@ -57,7 +54,6 @@ class Database:
     
     @staticmethod
     async def get_user_channels(owner_id):
-        """Get channels for specific user"""
         try:
             cursor = Database.channels.find({"owner_id": owner_id})
             return await cursor.to_list(length=100)
@@ -67,7 +63,6 @@ class Database:
     
     @staticmethod
     async def update_channel_membership(chat_id, is_member, joined_at=None):
-        """Update channel membership status"""
         update_data = {"user_is_member": is_member}
         if joined_at:
             update_data["user_joined_at"] = joined_at
@@ -82,7 +77,6 @@ class Database:
     
     @staticmethod
     async def save_setup(chat_id, owner_id, installed_bots):
-        """Save channel setup"""
         await Database.channels.update_one(
             {"channel_id": chat_id},
             {
@@ -103,7 +97,6 @@ class Database:
     
     @staticmethod
     async def update_channel_bots(chat_id, installed_bots):
-        """Update installed bots for a channel"""
         await Database.channels.update_one(
             {"channel_id": chat_id},
             {"$set": {
@@ -114,12 +107,12 @@ class Database:
     
     @staticmethod
     async def get_total_stats():
-        """Get global statistics"""
+        """Get global statistics with crash prevention"""
         try:
             total_channels = await Database.channels.count_documents({})
             unique_owners = len(await Database.channels.distinct("owner_id"))
             
-            # FIX: Use $ifNull to handle channels where setup isn't finished (missing installed_bots)
+            # FIX: Use $ifNull to handle channels where setup isn't finished
             pipeline = [
                 {"$project": {"bot_count": {"$size": {"$ifNull": ["$installed_bots", []]}}}},
                 {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
@@ -149,14 +142,9 @@ class Database:
     
     @staticmethod
     async def save_restart_info(chat_id, message_id, status, error=None):
-        """Save restart information for post-restart notification"""
         try:
             restart_collection = Database.db["restart_info"]
-            
-            # Clear old entries (keep only latest)
             await restart_collection.delete_many({})
-            
-            # Save new restart info
             await restart_collection.insert_one({
                 "chat_id": chat_id,
                 "message_id": message_id,
@@ -164,36 +152,26 @@ class Database:
                 "error": error,
                 "timestamp": datetime.utcnow()
             })
-            
             LOGGER.info(f"✅ Restart info saved: status={status}, chat={chat_id}, msg={message_id}")
         except Exception as e:
             LOGGER.error(f"❌ Failed to save restart info: {e}")
     
     @staticmethod
     async def get_restart_info():
-        """Get restart information and delete it"""
         try:
             restart_collection = Database.db["restart_info"]
-            
-            # Find the restart info
             info = await restart_collection.find_one()
-            
             if info:
-                # Delete it after retrieving
                 await restart_collection.delete_one({"_id": info["_id"]})
                 LOGGER.info(f"✅ Retrieved restart info: status={info.get('status')}")
                 return info
-            else:
-                LOGGER.debug("No restart info found")
-                return None
-                
+            return None
         except Exception as e:
             LOGGER.error(f"❌ Failed to get restart info: {e}")
             return None
     
     @staticmethod
     def close():
-        """Close database connection"""
         if Database.client:
             Database.client.close()
             LOGGER.info("✅ Database connection closed")
