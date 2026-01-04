@@ -8,7 +8,7 @@ async def health_check(request):
     return web.Response(text="✅ LinkerX is alive")
 
 async def start_web_server():
-    """Start web server"""
+    """Start aiohttp web server for health checks"""
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
@@ -19,10 +19,10 @@ async def start_web_server():
     LOGGER.info(f"🌐 Web server started on port {Config.PORT}")
 
 async def ping_server():
-    """Self-ping to prevent sleep"""
-    await asyncio.sleep(60)
+    """Self-ping to prevent Render/Heroku sleep"""
+    await asyncio.sleep(60)  # Initial delay
     while True:
-        await asyncio.sleep(600)
+        await asyncio.sleep(600)  # Ping every 10 minutes
         try:
             async with ClientSession() as session:
                 async with session.get(Config.URL, timeout=10) as resp:
