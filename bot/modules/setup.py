@@ -1,5 +1,5 @@
 import asyncio
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.errors import (
     UserNotParticipant, 
     ChatAdminRequired, 
@@ -39,7 +39,9 @@ async def setup_logic(message, chat_id, owner_id):
                 LOGGER.error(f"[STEP 2] ❌ FAILED to add helper: {type(e).__name__} - {e}")
                 raise
             
-            await asyncio.sleep(2)
+            # INCREASED DELAY: Give Telegram 5 seconds to sync admin rights
+            LOGGER.info("[STEP 2] ⏳ Waiting 5s for permissions to propagate...")
+            await asyncio.sleep(5)
         else:
             LOGGER.info(f"[STEP 2] Helper already in channel, skipping add")
         
@@ -47,11 +49,8 @@ async def setup_logic(message, chat_id, owner_id):
         LOGGER.info(f"[STEP 3] Verifying helper permissions in {chat_id}")
         try:
             helper_member = await Clients.user_app.get_chat_member(chat_id, "me")
-            LOGGER.info(f"[STEP 3] Helper status: {helper_member.status}")
-            LOGGER.info(f"[STEP 3] Helper privileges: {helper_member.privileges}")
             
             can_promote = getattr(helper_member.privileges, "can_promote_members", False) if helper_member.privileges else False
-            LOGGER.info(f"[STEP 3] Helper can_promote_members: {can_promote}")
             
             if not can_promote:
                 LOGGER.error(f"[STEP 3] ❌ Helper lacks promote permission!")
@@ -89,7 +88,6 @@ async def setup_logic(message, chat_id, owner_id):
             raise
         
         # Step 6: Send completion message
-        active_count = await Database.get_active_channel_count()
         text = (
             f"✅ **Setup complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
