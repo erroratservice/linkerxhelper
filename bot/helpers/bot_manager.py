@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pyrogram.types import ChatPrivileges
 from pyrogram.errors import FloodWait, ChatAdminRequired, UserAlreadyParticipant
 from bot.client import Clients
@@ -23,17 +24,23 @@ class BotManager:
         
         LOGGER.info(f"[BOT_MANAGER] Processing {len(bots_list)} bots with {Config.SYNC_ACTION_DELAY}s delay between each")
         
+        # Track last update time to prevent FloodWait
+        last_update_time = 0
+        
         for i, username in enumerate(bots_list):
-            # Update status message
-            if status_msg:
+            # Update status message (Rate limited: every 15s)
+            current_time = time.time()
+            if status_msg and (current_time - last_update_time >= 15):
                 try:
                     await status_msg.edit(
                         f"⚙️ **Processing...**\n"
                         f"🤖 Bot: `{username}`\n"
                         f"📊 Progress: {i+1}/{len(bots_list)}"
                     )
-                except:
-                    pass
+                    last_update_time = current_time
+                except Exception as e:
+                    # Ignore update errors (message might be deleted or too old)
+                    LOGGER.debug(f"Status update skipped: {e}")
             
             # Flag to track if we need to apply delay
             delay_applied = False
