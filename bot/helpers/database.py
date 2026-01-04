@@ -112,7 +112,7 @@ class Database:
             total_channels = await Database.channels.count_documents({})
             unique_owners = len(await Database.channels.distinct("owner_id"))
             
-            # FIX: Use $ifNull to handle channels where setup isn't finished
+            # Use $ifNull to prevent crashes on incomplete setups
             pipeline = [
                 {"$project": {"bot_count": {"$size": {"$ifNull": ["$installed_bots", []]}}}},
                 {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
@@ -139,8 +139,9 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Error getting stats: {e}")
             return None
+            
+    # --- QUEUE & RESTART STATE ---
     
-    # --- QUEUE PERSISTENCE FOR CRASH HANDLING ---
     @staticmethod
     async def update_queue_state(queue_data):
         """Save the current queue list to DB (Crash Proofing)"""
@@ -171,9 +172,9 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Failed to clear queue state: {e}")
 
-    # --- RESTART INFO ---
     @staticmethod
-    async def save_restart_info(chat_id, message_id, status, error=None):
+    async def save_restart_info(chat_id, message_id, status, error=None, queue_data=None):
+        """Save restart info including pending queue data"""
         try:
             restart_collection = Database.db["restart_info"]
             await restart_collection.delete_many({})
@@ -182,6 +183,7 @@ class Database:
                 "message_id": message_id,
                 "status": status,
                 "error": error,
+                "queue_data": queue_data or [],  # This handles the passed list
                 "timestamp": datetime.utcnow()
             })
             LOGGER.info(f"✅ Restart info saved: status={status}, chat={chat_id}, msg={message_id}")
