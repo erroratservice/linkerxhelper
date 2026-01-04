@@ -53,7 +53,7 @@ class BotManager:
                 if action == "add":
                     LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Adding {username}")
                     
-                    # Try Adding
+                    # Step A: Try Adding as Member
                     try:
                         await Clients.user_app.add_chat_members(chat_id, username)
                         await asyncio.sleep(0.5)
@@ -62,7 +62,7 @@ class BotManager:
                     except Exception as e:
                         LOGGER.debug(f"Add member failed ({username}): {e}")
 
-                    # Try Promoting with Retry Logic
+                    # Step B: Try Promoting with Retry Logic
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
@@ -76,8 +76,8 @@ class BotManager:
                             break # Success, exit retry loop
                             
                         except RightForbidden:
-                            # 403: We probably can't edit this bot because owner added it
-                            # Check if it is ALREADY an admin
+                            # 403: We probably can't edit this bot because owner added it.
+                            # Check if it is ALREADY an admin.
                             try:
                                 m = await Clients.user_app.get_chat_member(chat_id, username)
                                 if m.status == ChatMemberStatus.ADMINISTRATOR:
@@ -112,20 +112,23 @@ class BotManager:
                             break
 
                 elif action == "remove":
-                    # ... (Remove logic remains largely the same, usually less prone to errors)
+                    LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Removing {username}")
                     try:
+                        # Demote
                         await Clients.user_app.promote_chat_member(
                             chat_id, username, privileges=ChatPrivileges()
                         )
+                        # Ban/Unban to remove
                         await Clients.user_app.ban_chat_member(chat_id, username)
                         await Clients.user_app.unban_chat_member(chat_id, username)
                         success.append(username)
+                        LOGGER.info(f"[BOT_MANAGER] ✅ {username} removed")
                     except Exception as e:
                         LOGGER.error(f"Remove failed {username}: {e}")
                         failed.append(username)
 
             finally:
-                # Safety Delay
+                # Safety Delay between bots
                 if not delay_applied and i < len(bots_list) - 1:
                     await asyncio.sleep(Config.SYNC_ACTION_DELAY)
 
