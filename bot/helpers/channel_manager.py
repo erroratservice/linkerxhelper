@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, UserAlreadyParticipant
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired, UserAlreadyParticipant, InviteRequestSent
 from bot.client import Clients
 from bot.helpers.database import Database
 from config import Config
@@ -28,7 +28,7 @@ class ChannelManager:
     
     @staticmethod
     async def add_helper_to_channel(chat_id):
-        """Add helper account to channel"""
+        """Add helper account to channel using invite link method"""
         helper_id = await Clients.get_helper_user_id()
         if not helper_id:
             raise RuntimeError("Helper user ID unavailable")
@@ -46,22 +46,52 @@ class ChannelManager:
         # Manage capacity before joining (spam protection)
         await ChannelManager.manage_capacity(chat_id)
         
-        # Add helper
+        # Method 1: Try direct add first
         try:
             await Clients.bot.add_chat_members(chat_id, helper_id)
+            await Database.update_channel_membership(chat_id, True, datetime.utcnow())
+            LOGGER.info(f"✅ Helper added to channel {chat_id} via direct add")
+            await asyncio.sleep(2)
+            return True
         except UserAlreadyParticipant:
             LOGGER.info(f"Helper already in channel {chat_id}")
-        except ChatAdminRequired:
-            LOGGER.error(f"Bot lacks rights to add helper to channel {chat_id}")
-            raise
-        except Exception as e:
-            LOGGER.error(f"Error adding helper to channel {chat_id}: {e}")
-            raise
+            await Database.update_channel_membership(chat_id, True, datetime.utcnow())
+            return True
+        except (ChatAdminRequired, Exception) as e:
+            LOGGER.warning(f"Direct add failed: {e}. Trying invite link method...")
         
-        await Database.update_channel_membership(chat_id, True, datetime.utcnow())
-        LOGGER.info(f"✅ Helper added to channel {chat_id}")
-        await asyncio.sleep(2)
-        return True
+        # Method 2: Create invite link and join via user account
+        try:
+            # Create an invite link
+            invite_link = await Clients.bot.export_chat_invite_link(chat_id)
+            LOGGER.info(f"Created invite link for {chat_id}")
+            
+            # Helper joins via the link
+            try:
+                await Clients.user_app.join_chat(invite_link)
+                await Database.update_channel_membership(chat_id, True, datetime.utcnow())
+                LOGGER.info(f"✅ Helper joined channel {chat_id} via invite link")
+                await asyncio.sleep(2)
+                return True
+            except InviteRequestSent:
+                raise RuntimeError(
+                    "Channel requires join approval. Please manually approve the join request "
+                    "from @HelpingYouSetup or disable join approval for this setup."
+                )
+        except ChatAdminRequired:
+            raise RuntimeError(
+                "Bot lacks permission to create invite links. "
+                "Please ensure the bot has 'Invite Users via Link' permission."
+            )
+        except Exception as e:
+            LOGGER.error(f"Invite link method failed: {e}")
+            raise RuntimeError(
+                f"Could not add helper to channel. Error: {str(e)}\n"
+                f"Please ensure:\n"
+                f"1. Bot has 'Add New Admins' permission\n"
+                f"2. Bot has 'Invite Users via Link' permission\n"
+                f"3. Channel doesn't require join approval"
+            )
     
     @staticmethod
     async def check_helper_membership(chat_id):
