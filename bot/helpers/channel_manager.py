@@ -39,17 +39,16 @@ class ChannelManager:
         if not helper_id:
             raise RuntimeError("Helper user ID unavailable")
         
-        # Check if already member
+        # Check if already member with proper permissions
         try:
             member = await Clients.user_app.get_chat_member(chat_id, "me")
             if member.status in ("member", "administrator", "creator"):
                 # If already admin with promote rights, we're done
                 if member.status in ("administrator", "creator"):
-                    is_admin = True
                     can_promote = getattr(member.privileges, "can_promote_members", False) if member.privileges else False
                     if can_promote or member.status == "creator":
                         await Database.update_channel_membership(chat_id, True)
-                        LOGGER.info(f"✅ Helper already admin in channel {chat_id}")
+                        LOGGER.info(f"✅ Helper already admin with promote rights in {chat_id}")
                         return True
                     else:
                         LOGGER.info(f"Helper is admin but lacks promote permission, will re-promote")
@@ -109,16 +108,29 @@ class ChannelManager:
                     f"• Channel doesn't require join approval"
                 )
         
-        # Step 3: Now promote helper to admin with necessary permissions
+        # Step 3: Get bot's own permissions to match helper's privileges
         if helper_added:
             try:
-                # Define privileges needed for helper to do its job
+                # Get bot's current privileges
+                bot_member = await Clients.bot.get_chat_member(chat_id, "me")
+                bot_privs = bot_member.privileges
+                
+                # Create helper privileges matching ONLY what bot has
+                # We can only give permissions we ourselves have
                 helper_privileges = ChatPrivileges(
-                    can_manage_chat=True,
-                    can_invite_users=True,
-                    can_promote_members=True,  # Critical: needed to promote bots
-                    can_restrict_members=True
+                    can_manage_chat=getattr(bot_privs, "can_manage_chat", False),
+                    can_delete_messages=getattr(bot_privs, "can_delete_messages", False),
+                    can_restrict_members=getattr(bot_privs, "can_restrict_members", False),
+                    can_promote_members=getattr(bot_privs, "can_promote_members", False),  # Critical
+                    can_change_info=getattr(bot_privs, "can_change_info", False),
+                    can_invite_users=getattr(bot_privs, "can_invite_users", False),
+                    can_pin_messages=getattr(bot_privs, "can_pin_messages", False),
+                    can_post_messages=getattr(bot_privs, "can_post_messages", False),
+                    can_edit_messages=getattr(bot_privs, "can_edit_messages", False),
+                    can_manage_video_chats=getattr(bot_privs, "can_manage_video_chats", False)
                 )
+                
+                LOGGER.info(f"Promoting helper with privileges matching bot's permissions")
                 
                 await Clients.bot.promote_chat_member(
                     chat_id, 
@@ -127,6 +139,16 @@ class ChannelManager:
                 )
                 LOGGER.info(f"✅ Helper promoted to admin in {chat_id}")
                 await asyncio.sleep(2)
+                
+                # Verify helper actually has promote permission
+                helper_member = await Clients.user_app.get_chat_member(chat_id, "me")
+                can_promote = getattr(helper_member.privileges, "can_promote_members", False) if helper_member.privileges else False
+                
+                if not can_promote:
+                    raise RuntimeError(
+                        "Helper promoted but doesn't have 'Add New Admins' permission.\n"
+                        "Please manually give @HelpingYouSetup the 'Add New Admins' permission in channel settings."
+                    )
                 
                 # Update database
                 await Database.update_channel_membership(chat_id, True, datetime.utcnow())
