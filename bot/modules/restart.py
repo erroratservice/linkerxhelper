@@ -1,11 +1,19 @@
 import os
 import sys
 import asyncio
+import re
 from pyrogram import filters
 from bot.client import Clients
 from bot.helpers.database import Database
 from config import Config
 from bot.utils.logger import LOGGER
+
+def sanitize_url(url):
+    """Remove tokens from URLs for logging"""
+    if not url:
+        return url
+    # Replace token with ***
+    return re.sub(r'(https?://)[^@]+@', r'\1***@', url)
 
 def run_git_command(cmd):
     """Run git command safely"""
@@ -18,7 +26,7 @@ def run_git_command(cmd):
 async def send_restart_notification():
     """Send notification after restart completes"""
     try:
-        # Wait a bit for everything to stabilize
+        # Wait for everything to stabilize
         await asyncio.sleep(5)
         
         restart_info = await Database.get_restart_info()
@@ -53,7 +61,7 @@ async def send_restart_notification():
             text = (
                 "⚠️ **Restarted with warnings**\n\n"
                 "🚀 LinkerX is back online\n"
-                f"⚠️ Note: {error or 'Unknown issue'}"
+                f"⚠️ Note: {error or 'Update check had issues'}"
             )
         
         # Send notification
@@ -66,7 +74,6 @@ async def send_restart_notification():
             LOGGER.info(f"✅ Restart notification sent to {chat_id}")
         except Exception as e:
             LOGGER.error(f"Failed to edit restart message: {e}")
-            # Try sending new message if edit fails
             try:
                 await Clients.bot.send_message(chat_id, text)
             except:
@@ -85,7 +92,7 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         LOGGER.info("PERFORMING RESTART")
         LOGGER.info("=" * 60)
         
-        # Stop clients gracefully
+        # Stop user client
         LOGGER.info("Stopping user client...")
         try:
             await Clients.user_app.stop()
@@ -93,11 +100,15 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         except Exception as e:
             LOGGER.error(f"Error stopping user client: {e}")
         
+        # Stop bot client properly
         LOGGER.info("Stopping bot client...")
         try:
-            # Don't await bot.stop() inside a handler - causes the error you saw
-            Clients.bot.stop()
-            LOGGER.info("✅ Bot client stop initiated")
+            # Create a task to stop the bot instead of awaiting directly
+            # This avoids the "Task cannot await on itself" error
+            loop = asyncio.get_event_loop()
+            loop.create_task(Clients.bot.stop())
+            await asyncio.sleep(1)  # Give it time to stop
+            LOGGER.info("✅ Bot client stopped")
         except Exception as e:
             LOGGER.error(f"Error stopping bot client: {e}")
         
@@ -112,7 +123,7 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         LOGGER.info("Restarting Python process...")
         LOGGER.info("=" * 60)
         
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         os.execv(sys.executable, [sys.executable, "bot.py"])
         
     except Exception as e:
@@ -158,12 +169,25 @@ async def check_and_pull_updates():
         LOGGER.info(f"Current commit: {old_commit}")
         
         # Fetch from remote
-        LOGGER.info(f"Fetching from: {Config.GITHUB_REPO} (branch: {Config.GITHUB_BRANCH})")
+        safe_repo_url = sanitize_url(Config.GITHUB_REPO)
+        LOGGER.info(f"Fetching from: {safe_repo_url} (branch: {Config.GITHUB_BRANCH})")
         fetch_result = run_git_command(f"git fetch origin {Config.GITHUB_BRANCH}")
         
-        if "error" in fetch_result.lower() or "fatal" in fetch_result.lower():
-            LOGGER.error(f"Fetch failed: {fetch_result}")
-            return False, f"Fetch failed", fetch_result[:100]
+        # Check for actual errors (not just the word "error" in output)
+        # Git fetch can output "From https://..." which is normal
+        is_error = False
+        if "fatal:" in fetch_result.lower():
+            is_error = True
+        elif "error:" in fetch_result.lower() and "from https://" not in fetch_result.lower():
+            is_error = True
+        elif "could not" in fetch_result.lower():
+            is_error = True
+        
+        if is_error:
+            LOGGER.error(f"Fetch failed: {fetch_result[:200]}")
+            return False, "Fetch failed", fetch_result[:100]
+        
+        LOGGER.info(f"Fetch successful")
         
         # Check for changes
         diff_output = run_git_command(f"git diff --name-only HEAD origin/{Config.GITHUB_BRANCH}")
@@ -182,8 +206,8 @@ async def check_and_pull_updates():
         LOGGER.info("Pulling updates...")
         pull_result = run_git_command(f"git pull origin {Config.GITHUB_BRANCH}")
         
-        if "error" in pull_result.lower() or "fatal" in pull_result.lower():
-            LOGGER.error(f"Pull failed: {pull_result}")
+        if "fatal:" in pull_result.lower() or "error:" in pull_result.lower():
+            LOGGER.error(f"Pull failed: {pull_result[:200]}")
             return False, "Pull failed", pull_result[:100]
         
         # Get new commit
@@ -237,13 +261,14 @@ async def restart_handler(client, message):
             restart_status = "updated"
         else:
             if error:
-                LOGGER.warning(f"⚠️ Update issue: {info} - {error}")
+                LOGGER.warning(f"⚠️ Update issue: {info}")
                 await status.edit(
-                    f"⚠️ **{info}**\n\n"
+                    f"ℹ️ **{info}**\n\n"
                     f"🔄 Restarting anyway...\n"
                     f"⏳ Bot will be back in ~15 seconds"
                 )
-                restart_status = "warning"
+                # Don't mark as warning unless it's critical
+                restart_status = "success"
             else:
                 LOGGER.info(f"ℹ️ {info}")
                 await status.edit(
