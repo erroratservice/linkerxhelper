@@ -1,12 +1,21 @@
 import asyncio
 from pyrogram.errors import FloodWait
 from bot.utils.logger import LOGGER
+from bot.helpers.database import Database
 
 class QueueManager:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.waiting_users = []
     
+    async def sync_db(self):
+        """Sync current queue state to database for crash recovery"""
+        snapshot = [
+            {"chat_id": user["chat_id"], "owner_id": user["owner_id"]} 
+            for user in self.waiting_users
+        ]
+        await Database.update_queue_state(snapshot)
+
     async def add_to_queue(self, message, target_chat, owner_id, handler):
         """Add setup request to queue"""
         data = {
@@ -16,6 +25,10 @@ class QueueManager:
             "handler": handler
         }
         self.waiting_users.append(data)
+        
+        # SAVE TO DB INSTANTLY (Crash Proof)
+        await self.sync_db()
+        
         pos = len(self.waiting_users)
         
         await message.edit(
@@ -63,6 +76,8 @@ class QueueManager:
             # Remove from waiting list before processing
             if data in self.waiting_users:
                 self.waiting_users.remove(data)
+                # SYNC REMOVAL TO DB
+                await self.sync_db()
             
             # Update positions for remaining users in background
             asyncio.create_task(self.update_positions())
