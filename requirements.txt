@@ -1,3 +1,4 @@
 pyrotgfork
 tgcrypto
 aiohttp
+pymongo>=4.9
