@@ -25,6 +25,10 @@ class Config:
     PORT = int(os.environ.get("PORT", 8080))
     URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
     
+    # GitHub Update Configuration
+    GITHUB_REPO = os.environ.get("GITHUB_REPO", "")  # e.g., "https://github.com/username/linkerx"
+    GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+    
     @staticmethod
     def validate_bot_usernames(bots):
         """Ensure bot usernames have @ prefix"""
@@ -54,7 +58,7 @@ class Config:
         
         if Config.OWNER_ID == 0:
             from bot.utils.logger import LOGGER
-            LOGGER.warning("⚠️ OWNER_ID not set - /sync and /stats will be disabled")
+            LOGGER.warning("⚠️ OWNER_ID not set - /sync, /stats, and /restart will be disabled")
         
         # Normalize bot usernames
         Config.BOTS_TO_ADD = Config.validate_bot_usernames(Config.BOTS_TO_ADD)
