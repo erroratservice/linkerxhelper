@@ -76,7 +76,7 @@ async def sync_all_channels(client, message):
                         f"⚠️ **LinkerX Sync Failed**\n\n"
                         f"🆔 Channel: `{chat_id}`\n"
                         f"❌ Error: {str(e)[:100]}\n\n"
-                        f"Please run `/setup {chat_id}` again to fix."
+                        f"Please run `/setup` inside the channel to fix."
                     )
                 except Exception as notify_err:
                     LOGGER.error(f"Failed to notify owner: {notify_err}")
