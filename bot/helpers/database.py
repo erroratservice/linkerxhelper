@@ -23,7 +23,7 @@ class Database:
             await Database.channels.create_index("user_is_member")
             LOGGER.info("✅ Database indexes created")
         except Exception as e:
-            LOGGER.error(f"Database initialization error: {e}")
+            LOGGER.error(f"❌ Database initialization error: {e}")
             raise
     
     @staticmethod
@@ -45,6 +45,25 @@ class Database:
         cursor = Database.channels.find(query).sort("user_joined_at", 1).limit(1)
         result = await cursor.to_list(length=1)
         return result[0] if result else None
+    
+    @staticmethod
+    async def get_all_channels():
+        """Get all channels"""
+        try:
+            return await Database.channels.find({}).to_list(length=None)
+        except Exception as e:
+            LOGGER.error(f"Error getting all channels: {e}")
+            return []
+    
+    @staticmethod
+    async def get_user_channels(owner_id):
+        """Get channels for specific user"""
+        try:
+            cursor = Database.channels.find({"owner_id": owner_id})
+            return await cursor.to_list(length=100)
+        except Exception as e:
+            LOGGER.error(f"Error getting user channels: {e}")
+            return []
     
     @staticmethod
     async def update_channel_membership(chat_id, is_member, joined_at=None):
@@ -83,7 +102,54 @@ class Database:
         )
     
     @staticmethod
+    async def update_channel_bots(chat_id, installed_bots):
+        """Update installed bots for a channel"""
+        await Database.channels.update_one(
+            {"channel_id": chat_id},
+            {"$set": {
+                "installed_bots": installed_bots,
+                "last_updated": datetime.utcnow()
+            }}
+        )
+    
+    @staticmethod
+    async def get_total_stats():
+        """Get global statistics"""
+        try:
+            total_channels = await Database.channels.count_documents({})
+            unique_owners = len(await Database.channels.distinct("owner_id"))
+            
+            # Total bot installations
+            pipeline = [
+                {"$project": {"bot_count": {"$size": "$installed_bots"}}},
+                {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
+            ]
+            result = await Database.channels.aggregate(pipeline).to_list(length=1)
+            total_bots = result[0]["total_bots"] if result else 0
+            
+            # Oldest membership
+            cursor = Database.channels.find({"user_is_member": True}).sort("user_joined_at", 1).limit(1)
+            oldest_list = await cursor.to_list(length=1)
+            oldest_info = "N/A"
+            if oldest_list:
+                join_date = oldest_list[0].get("user_joined_at")
+                if join_date:
+                    days = (datetime.utcnow() - join_date).days
+                    oldest_info = f"{days} days ago"
+            
+            return {
+                "total_channels": total_channels,
+                "unique_owners": unique_owners,
+                "total_bots": total_bots,
+                "oldest_membership": oldest_info
+            }
+        except Exception as e:
+            LOGGER.error(f"Error getting stats: {e}")
+            return None
+    
+    @staticmethod
     def close():
         """Close database connection"""
         if Database.client:
             Database.client.close()
+            LOGGER.info("✅ Database connection closed")
