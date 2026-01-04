@@ -8,7 +8,9 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import ChatPrivileges
 from pyrogram.errors import (
     UserNotParticipant,
-    FloodWait
+    FloodWait,
+    ChatAdminRequired,
+    UserAlreadyParticipant
 )
 
 # --- CONFIGURATION ---
@@ -24,13 +26,17 @@ BOTS_TO_ADD = [b.strip() for b in os.environ.get("BOTS_TO_ADD", "").split(",") i
 
 # Safety Delays - IMPORTANT FOR ACCOUNT PROTECTION
 SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10))  # Seconds between channels in sync
-SYNC_ACTION_DELAY = 2  # Seconds between adding bots in setup
+SYNC_ACTION_DELAY = 2  # Seconds between adding bots
+
+# Channel limit - Keep user in max 100 channels to avoid spam flags
+MAX_USER_CHANNELS = int(os.environ.get("MAX_USER_CHANNELS", 100))  # Safe limit, well below 500
 
 PORT = int(os.environ.get("PORT", 8080))
 URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
 
-# Cache for username (will be fetched dynamically)
-_username_cache = None
+# Cache for usernames
+_bot_username_cache = None
+_helper_username_cache = None
 
 # Logging
 logging.basicConfig(
@@ -85,8 +91,9 @@ if not BOTS_TO_ADD:
 # Validate environment
 validate_env()
 
-# Log safety delays
+# Log safety settings
 logger.info(f"🛡️ Safety delays: {SYNC_ACTION_DELAY}s between bots, {SYNC_CHANNEL_DELAY}s between channels")
+logger.info(f"📊 Max user channels: {MAX_USER_CHANNELS} (spam protection)")
 
 # --- DATABASE ---
 mongo_client = AsyncMongoClient(MONGO_URL)
@@ -98,6 +105,8 @@ async def init_db():
     try:
         await channels_col.create_index("channel_id", unique=True)
         await channels_col.create_index("owner_id")
+        await channels_col.create_index("user_joined_at")  # Track join order for cleanup
+        await channels_col.create_index("user_is_member")  # Fast lookup of active channels
         logger.info("✅ Database indexes created")
     except Exception as e:
         logger.error(f"❌ Database initialization error: {e}")
@@ -107,23 +116,171 @@ async def init_db():
 bot = Client("bot_client", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 user_app = Client("user_client", api_id=API_ID, api_hash=API_HASH, session_string=USER_SESSION, in_memory=True)
 
-# --- HELPER USERNAME FUNCTION ---
+# --- USERNAME FUNCTIONS ---
+async def get_bot_username():
+    """Get the username of the bot (cached)"""
+    global _bot_username_cache
+    
+    if _bot_username_cache:
+        return _bot_username_cache
+    
+    try:
+        me = await bot.get_me()
+        _bot_username_cache = me.username or None
+        if _bot_username_cache:
+            logger.info(f"✅ Bot username cached: @{_bot_username_cache}")
+        return _bot_username_cache
+    except Exception as e:
+        logger.error(f"Failed to get bot username: {e}")
+        return None
+
 async def get_helper_username():
     """Get the username of the helper account (cached)"""
-    global _username_cache
+    global _helper_username_cache
     
-    if _username_cache:
-        return _username_cache
+    if _helper_username_cache:
+        return _helper_username_cache
     
     try:
         me = await user_app.get_me()
-        _username_cache = me.username or None
-        if _username_cache:
-            logger.info(f"✅ Helper username cached: @{_username_cache}")
-        return _username_cache
+        _helper_username_cache = me.username or None
+        if _helper_username_cache:
+            logger.info(f"✅ Helper username cached: @{_helper_username_cache}")
+        return _helper_username_cache
     except Exception as e:
-        logger.error(f"Failed to get username: {e}")
+        logger.error(f"Failed to get helper username: {e}")
         return None
+
+async def get_helper_user_id():
+    """Get the user ID of the helper account"""
+    try:
+        me = await user_app.get_me()
+        return me.id
+    except Exception as e:
+        logger.error(f"Failed to get helper user ID: {e}")
+        return None
+
+# --- CHANNEL MEMBERSHIP MANAGEMENT ---
+async def get_active_channel_count():
+    """Get count of channels where user is currently a member"""
+    try:
+        count = await channels_col.count_documents({"user_is_member": True})
+        return count
+    except Exception as e:
+        logger.error(f"Error counting active channels: {e}")
+        return 0
+
+async def manage_channel_capacity_before_join(new_channel_id):
+    """
+    Before joining a new channel, check capacity and remove from oldest if needed.
+    This prevents spam flags by maintaining a stable membership count.
+    """
+    active_count = await get_active_channel_count()
+    
+    if active_count >= MAX_USER_CHANNELS:
+        logger.warning(f"⚠️ At channel limit ({active_count}/{MAX_USER_CHANNELS}). Removing from oldest channel...")
+        
+        # Find the OLDEST channel where user is member (by join timestamp)
+        cursor = channels_col.find(
+            {"user_is_member": True, "channel_id": {"$ne": new_channel_id}}
+        ).sort("user_joined_at", 1).limit(1)
+        
+        oldest_channels = await cursor.to_list(length=1)
+        
+        if oldest_channels:
+            oldest = oldest_channels[0]
+            try:
+                # Leave the oldest channel
+                await user_app.leave_chat(oldest['channel_id'])
+                
+                # Update database
+                await channels_col.update_one(
+                    {"channel_id": oldest['channel_id']},
+                    {
+                        "$set": {
+                            "user_is_member": False,
+                            "user_left_at": datetime.utcnow()
+                        }
+                    }
+                )
+                
+                logger.info(f"✅ Left oldest channel {oldest['channel_id']} (joined {oldest.get('user_joined_at')})")
+                await asyncio.sleep(2)  # Brief delay after leaving
+                
+            except Exception as e:
+                logger.error(f"Failed to leave oldest channel {oldest['channel_id']}: {e}")
+
+async def add_user_to_channel(chat_id):
+    """
+    Bot adds user account to channel and tracks membership.
+    Manages capacity before joining to prevent spam flags.
+    """
+    helper_id = await get_helper_user_id()
+    if not helper_id:
+        raise Exception("Could not get helper user ID")
+    
+    # Check if already a member
+    try:
+        member = await user_app.get_chat_member(chat_id, "me")
+        if member.status in ["member", "administrator", "creator"]:
+            logger.info(f"✅ Helper already in channel {chat_id}")
+            
+            # Update membership status in case it was marked as not member
+            await channels_col.update_one(
+                {"channel_id": chat_id},
+                {"$set": {"user_is_member": True}},
+                upsert=False
+            )
+            return True
+    except UserNotParticipant:
+        pass  # Need to join
+    
+    # Manage capacity BEFORE joining (spam protection)
+    await manage_channel_capacity_before_join(chat_id)
+    
+    try:
+        # Bot adds user account
+        await bot.add_chat_members(chat_id, helper_id)
+        
+        # Update database with join timestamp
+        await channels_col.update_one(
+            {"channel_id": chat_id},
+            {
+                "$set": {
+                    "user_is_member": True,
+                    "user_joined_at": datetime.utcnow()
+                }
+            },
+            upsert=False
+        )
+        
+        logger.info(f"✅ Added helper to channel {chat_id}")
+        await asyncio.sleep(2)  # Brief delay after joining
+        return True
+        
+    except UserAlreadyParticipant:
+        logger.info(f"Helper already in channel {chat_id}")
+        await channels_col.update_one(
+            {"channel_id": chat_id},
+            {"$set": {"user_is_member": True}},
+            upsert=False
+        )
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to add helper to channel: {e}")
+        raise
+
+async def check_user_membership(chat_id):
+    """Check if user account is currently in the channel"""
+    try:
+        member = await user_app.get_chat_member(chat_id, "me")
+        return member.status in ["member", "administrator", "creator"]
+    except UserNotParticipant:
+        return False
+    except Exception as e:
+        logger.error(f"Error checking membership: {e}")
+        return False
 
 # --- QUEUE SYSTEM ---
 class QueueManager:
@@ -198,14 +355,13 @@ class QueueManager:
                     pass
             
             self.queue.task_done()
-            # DELAY BETWEEN QUEUE REQUESTS - IMPORTANT FOR RATE LIMITING
             await asyncio.sleep(2)
 
 queue_manager = QueueManager()
 
 # --- HELPER LOGIC ---
 async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
-    """Process adding or removing bots from a channel"""
+    """Process adding or removing bots from a channel (user account must be in channel)"""
     if not bots_list:
         return [], []
         
@@ -223,7 +379,6 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
     )
 
     for i, username in enumerate(bots_list):
-        # Update status message
         if status_msg:
             try:
                 await status_msg.edit(
@@ -236,7 +391,7 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
 
         try:
             if action == 'add':
-                # Try to add member first (ignore if already member)
+                # Try to add member first
                 try:
                     await user_app.add_chat_members(chat_id, username)
                     await asyncio.sleep(0.5)
@@ -248,25 +403,21 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
                 success.append(username)
                 
             elif action == 'remove':
-                # Demote from admin
                 await user_app.promote_chat_member(
                     chat_id, 
                     username, 
                     privileges=ChatPrivileges(can_manage_chat=False)
                 )
-                # Remove from channel
                 await user_app.ban_chat_member(chat_id, username)
                 await user_app.unban_chat_member(chat_id, username)
                 success.append(username)
             
-            # CRITICAL DELAY - Prevents Telegram rate limits and account restrictions
             await asyncio.sleep(SYNC_ACTION_DELAY)
             
         except FloodWait as fw:
             logger.warning(f"⏳ FloodWait {fw.value}s for {username}")
             await asyncio.sleep(fw.value + 1)
             
-            # Retry once after waiting
             try:
                 if action == 'add':
                     await user_app.promote_chat_member(chat_id, username, privileges=privileges)
@@ -289,69 +440,94 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
     return success, failed
 
 async def setup_logic(message, target_chat, owner_id):
-    """Main setup logic for adding bots to channel"""
-    # Process bots
-    successful, failed = await process_channel_bots(
-        target_chat, 
-        'add', 
-        BOTS_TO_ADD, 
-        message
-    )
+    """
+    Main setup logic - bot is already admin.
+    User account joins and STAYS in channel (spam protection).
+    """
     
-    # Update database with results
-    await channels_col.update_one(
-        {"channel_id": target_chat},
-        {
-            "$set": {
-                "channel_id": target_chat,
-                "owner_id": owner_id,
-                "installed_bots": successful,
-                "last_updated": datetime.utcnow()
+    try:
+        # Step 1: Check if user is already in channel
+        is_member = await check_user_membership(target_chat)
+        
+        if not is_member:
+            # Step 2: Add user account to channel (manages capacity automatically)
+            await message.edit("➕ **Managing channel access...**")
+            await add_user_to_channel(target_chat)
+            await asyncio.sleep(2)  # Ensure membership is registered
+        else:
+            logger.info(f"User already in channel {target_chat}")
+        
+        # Step 3: User account adds bots
+        await message.edit("🤖 **Adding bots...**")
+        successful, failed = await process_channel_bots(
+            target_chat, 
+            'add', 
+            BOTS_TO_ADD, 
+            message
+        )
+        
+        # Step 4: Update database (USER STAYS IN CHANNEL)
+        await channels_col.update_one(
+            {"channel_id": target_chat},
+            {
+                "$set": {
+                    "channel_id": target_chat,
+                    "owner_id": owner_id,
+                    "installed_bots": successful,
+                    "last_updated": datetime.utcnow(),
+                    "user_is_member": True  # IMPORTANT: User stays
+                },
+                "$setOnInsert": {
+                    "setup_date": datetime.utcnow(),
+                    "user_joined_at": datetime.utcnow()
+                }
             },
-            "$setOnInsert": {
-                "setup_date": datetime.utcnow()
-            }
-        },
-        upsert=True
-    )
-    
-    # Send completion message
-    text = (
-        f"✅ **Setup Complete!**\n\n"
-        f"📢 Channel: `{target_chat}`\n"
-        f"🤖 Added: {len(successful)}/{len(BOTS_TO_ADD)}\n"
-    )
-    
-    if failed:
-        text += f"\n⚠️ Failed: {', '.join(failed)}"
-    
-    await message.edit(text)
+            upsert=True
+        )
+        
+        # Get current active channel count
+        active_count = await get_active_channel_count()
+        
+        # Final message
+        text = (
+            f"✅ **Setup Complete!**\n\n"
+            f"📢 Channel: `{target_chat}`\n"
+            f"🤖 Added: {len(successful)}/{len(BOTS_TO_ADD)}\n"
+            f"📊 Active channels: {active_count}/{MAX_USER_CHANNELS}\n"
+        )
+        
+        if failed:
+            text += f"\n⚠️ Failed: {', '.join(failed)}"
+        
+        await message.edit(text)
+        
+    except Exception as e:
+        logger.error(f"Setup error: {e}")
+        raise
 
 # --- COMMANDS ---
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     """Welcome message with setup instructions"""
-    # Dynamically fetch username
-    username = await get_helper_username()
-    
-    if username:
-        helper_mention = f"@{username}"
-    else:
-        helper_mention = "the LinkerX Helper Account"
+    bot_username = await get_bot_username()
+    bot_mention = f"@{bot_username}" if bot_username else "this bot"
     
     await message.reply_text(
         f"👋 **Welcome to LinkerX Service Setup!**\n\n"
         f"I can configure your channel with the required bots automatically.\n\n"
         f"**🚀 Setup Instructions:**\n\n"
-        f"1️⃣ **Add** this user to your channel:\n"
-        f"   👉 {helper_mention}\n\n"
+        f"1️⃣ **Add** {bot_mention} to your channel\n\n"
         f"2️⃣ **Promote** it to Admin with:\n"
         f"   ✅ __'Add New Admins'__ permission enabled\n\n"
         f"3️⃣ **Get your Channel ID** from @username_to_id_bot\n\n"
         f"4️⃣ **Run the command:**\n"
         f"   `/setup <channel_id>`\n"
         f"   Example: `/setup -100123456789`\n\n"
+        f"**🛡️ Spam Protection:**\n"
+        f"• Helper account stays in up to {MAX_USER_CHANNELS} channels\n"
+        f"• Oldest channels auto-removed when limit reached\n"
+        f"• Natural usage pattern prevents spam flags\n\n"
         f"**📋 Other Commands:**\n"
         f"• `/list` - View your channels\n"
         f"• `/help` - Show this message"
@@ -375,7 +551,6 @@ async def setup_handler(client, message):
 
     raw_id = message.command[1]
     
-    # Parse channel ID
     try:
         target_chat = int(raw_id) if raw_id.lstrip("-").isdigit() else raw_id
     except:
@@ -384,34 +559,36 @@ async def setup_handler(client, message):
 
     status_msg = await message.reply_text("🔍 **Checking permissions...**")
 
-    # Verify permissions
+    # Verify BOT permissions (not user account)
     try:
-        member = await user_app.get_chat_member(target_chat, "me")
+        bot_member = await bot.get_chat_member(target_chat, "me")
         can_promote = (
-            member.status == "creator" or 
-            (member.status == "administrator" and 
-             member.privileges and 
-             member.privileges.can_promote_members)
+            bot_member.status == "creator" or 
+            (bot_member.status == "administrator" and 
+             bot_member.privileges and 
+             bot_member.privileges.can_promote_members)
         )
         
         if not can_promote:
+            bot_username = await get_bot_username()
+            bot_mention = f"@{bot_username}" if bot_username else "the bot"
+            
             await status_msg.edit(
-                "⚠️ **Missing Permissions!**\n\n"
-                "The LinkerX helper account needs:\n"
-                "✅ Admin status\n"
-                "✅ 'Add New Admins' permission enabled\n\n"
-                "Please update permissions and try again."
+                f"⚠️ **Missing Permissions!**\n\n"
+                f"{bot_mention} needs:\n"
+                f"✅ Admin status\n"
+                f"✅ 'Add New Admins' permission enabled\n\n"
+                f"Please update permissions and try again."
             )
             return
             
     except UserNotParticipant:
-        # Dynamically fetch username for error message
-        username = await get_helper_username()
-        helper_mention = f"@{username}" if username else "the LinkerX Helper Account"
+        bot_username = await get_bot_username()
+        bot_mention = f"@{bot_username}" if bot_username else "the bot"
         
         await status_msg.edit(
-            f"⚠️ **User Not Found!**\n\n"
-            f"Please add {helper_mention} to your channel first,\n"
+            f"⚠️ **Bot Not Found!**\n\n"
+            f"Please add {bot_mention} to your channel first,\n"
             f"then promote it to admin with 'Add New Admins' permission."
         )
         return
@@ -441,19 +618,32 @@ async def list_handler(client, message):
         
         text = "📂 **Your LinkerX Channels:**\n\n"
         
-        for idx, ch in enumerate(channels, 1):
-            bots = ch.get('installed_bots', [])
-            setup_date = ch.get('setup_date', None)
-            
-            text += f"{idx}. **Channel ID:** `{ch['channel_id']}`\n"
-            text += f"   🤖 Bots: {len(bots)}/{len(BOTS_TO_ADD)}\n"
-            
-            if setup_date:
-                text += f"   📅 Setup: {setup_date.strftime('%Y-%m-%d')}\n"
-            
-            text += "\n"
+        active_channels = [ch for ch in channels if ch.get('user_is_member')]
+        inactive_channels = [ch for ch in channels if not ch.get('user_is_member')]
         
-        text += f"📊 Total: {len(channels)} channel(s)"
+        if active_channels:
+            text += "**🟢 Active (Helper Present):**\n"
+            for idx, ch in enumerate(active_channels, 1):
+                bots = ch.get('installed_bots', [])
+                text += f"{idx}. `{ch['channel_id']}`\n"
+                text += f"   🤖 Bots: {len(bots)}/{len(BOTS_TO_ADD)}\n"
+                join_date = ch.get('user_joined_at')
+                if join_date:
+                    text += f"   📅 Joined: {join_date.strftime('%Y-%m-%d')}\n"
+                text += "\n"
+        
+        if inactive_channels:
+            text += "\n**⚪ Inactive (Helper Removed):**\n"
+            for idx, ch in enumerate(inactive_channels, 1):
+                bots = ch.get('installed_bots', [])
+                text += f"{idx}. `{ch['channel_id']}`\n"
+                text += f"   🤖 Bots: {len(bots)}/{len(BOTS_TO_ADD)}\n"
+                text += "\n"
+        
+        # Show capacity info
+        active_count = await get_active_channel_count()
+        text += f"📊 **Summary:**\n"
+        text += f"Total: {len(channels)} | Active: {active_count}/{MAX_USER_CHANNELS}"
         
         await message.reply_text(text)
         
@@ -468,6 +658,7 @@ async def sync_all_channels(client, message):
     
     processed = 0
     errors = 0
+    rejoined = 0
     
     try:
         channels = await channels_col.find({}).to_list(length=None)
@@ -483,16 +674,25 @@ async def sync_all_channels(client, message):
             to_add = list(wanted - current)
             to_remove = list(current - wanted)
             
-            # Skip if no changes needed
             if not to_add and not to_remove:
                 continue
             
             try:
-                # Process additions and removals
+                # Check if user is already in channel
+                is_member = await check_user_membership(chat_id)
+                
+                if not is_member:
+                    # Need to rejoin
+                    logger.info(f"Rejoining channel {chat_id} for sync")
+                    await add_user_to_channel(chat_id)
+                    rejoined += 1
+                    await asyncio.sleep(2)
+                
+                # Sync bots
                 added_success, _ = await process_channel_bots(chat_id, 'add', to_add)
                 removed_success, _ = await process_channel_bots(chat_id, 'remove', to_remove)
                 
-                # Update database
+                # Update database (keep membership status as is)
                 new_state = list((current - set(removed_success)) | set(added_success))
                 await channels_col.update_one(
                     {"channel_id": chat_id},
@@ -503,15 +703,13 @@ async def sync_all_channels(client, message):
                 )
                 
                 processed += 1
-                
-                # CRITICAL DELAY BETWEEN CHANNELS - Prevents account restrictions
                 await asyncio.sleep(SYNC_CHANNEL_DELAY)
                 
             except Exception as e:
                 errors += 1
                 logger.error(f"Sync error for {chat_id}: {e}")
                 
-                # Notify channel owner
+                # Notify owner
                 try:
                     await bot.send_message(
                         doc['owner_id'],
@@ -523,23 +721,23 @@ async def sync_all_channels(client, message):
                 except:
                     pass
             
-            # Update status every 5 channels
             if idx % 5 == 0:
                 try:
                     await status_msg.edit(
                         f"🔄 **Syncing...**\n\n"
                         f"Progress: {idx}/{total}\n"
                         f"✅ Updated: {processed}\n"
+                        f"🔄 Rejoined: {rejoined}\n"
                         f"❌ Errors: {errors}"
                     )
                 except:
                     pass
         
-        # Final report
         await status_msg.edit(
             f"✅ **Sync Finished!**\n\n"
             f"📊 Total Channels: {total}\n"
             f"📝 Updated: {processed}\n"
+            f"🔄 Rejoined: {rejoined}\n"
             f"⚠️ Errors: {errors}"
         )
         
@@ -551,11 +749,10 @@ async def sync_all_channels(client, message):
 async def stats_handler(client, message):
     """Show global statistics (Owner only)"""
     try:
-        # Get basic counts
         total_channels = await channels_col.count_documents({})
         unique_owners = len(await channels_col.distinct("owner_id"))
+        active_memberships = await get_active_channel_count()
         
-        # Calculate total bot installations
         pipeline = [
             {"$project": {"bot_count": {"$size": "$installed_bots"}}},
             {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
@@ -563,9 +760,18 @@ async def stats_handler(client, message):
         result = await channels_col.aggregate(pipeline).to_list(length=1)
         total_bots = result[0]['total_bots'] if result else 0
         
-        # Get helper username
-        username = await get_helper_username()
-        helper_info = f"@{username}" if username else "Not available"
+        bot_username = await get_bot_username()
+        helper_username = await get_helper_username()
+        
+        # Calculate oldest membership
+        cursor = channels_col.find({"user_is_member": True}).sort("user_joined_at", 1).limit(1)
+        oldest = await cursor.to_list(length=1)
+        oldest_info = "N/A"
+        if oldest:
+            join_date = oldest[0].get('user_joined_at')
+            if join_date:
+                days_ago = (datetime.utcnow() - join_date).days
+                oldest_info = f"{days_ago} days ago"
         
         text = (
             f"📊 **LinkerX Statistics**\n\n"
@@ -574,8 +780,13 @@ async def stats_handler(client, message):
             f"🤖 Total Bot Installs: {total_bots}\n"
             f"⚙️ Configured Bots: {len(BOTS_TO_ADD)}\n"
             f"📋 Queue Size: {queue_manager.queue.qsize()}\n"
-            f"⏳ Waiting: {len(queue_manager.waiting_users)}\n"
-            f"👤 Helper Account: {helper_info}"
+            f"⏳ Waiting: {len(queue_manager.waiting_users)}\n\n"
+            f"**🛡️ Spam Protection:**\n"
+            f"Active Memberships: {active_memberships}/{MAX_USER_CHANNELS}\n"
+            f"Oldest Membership: {oldest_info}\n\n"
+            f"**Accounts:**\n"
+            f"🤖 Bot: @{bot_username or 'N/A'}\n"
+            f"👤 Helper: @{helper_username or 'N/A'}"
         )
         
         await message.reply_text(text)
@@ -602,11 +813,10 @@ async def start_web():
 
 async def ping():
     """Self-ping to prevent Render sleep"""
-    # Initial delay
     await asyncio.sleep(60)
     
     while True:
-        await asyncio.sleep(600)  # Every 10 minutes
+        await asyncio.sleep(600)
         try:
             async with ClientSession() as session:
                 async with session.get(URL, timeout=10) as resp:
@@ -618,41 +828,36 @@ async def ping():
 async def main():
     """Main entry point"""
     try:
-        # Start web server
         await start_web()
-        
-        # Initialize database
         await init_db()
         
-        # Start bot client
         await bot.start()
         logger.info("✅ Bot client started")
         
-        # Start user session with error handling
         try:
             await user_app.start()
             logger.info("✅ User session started")
         except Exception as e:
             logger.critical(f"❌ Failed to start user session: {e}")
-            logger.critical("Check USER_SESSION environment variable")
             await bot.stop()
             return
         
-        # Pre-fetch and cache username
-        username = await get_helper_username()
-        if username:
-            logger.info(f"✅ Helper Account: @{username}")
-        else:
-            logger.warning("⚠️ Could not fetch helper username")
+        # Pre-fetch usernames
+        bot_username = await get_bot_username()
+        helper_username = await get_helper_username()
         
-        # Start background workers
+        if bot_username:
+            logger.info(f"✅ Bot Account: @{bot_username}")
+        if helper_username:
+            logger.info(f"✅ Helper Account: @{helper_username}")
+        
         asyncio.create_task(queue_manager.worker())
         asyncio.create_task(ping())
         
         logger.info("🚀 LinkerX Service Ready")
         logger.info(f"📝 Configured with {len(BOTS_TO_ADD)} bots")
+        logger.info(f"🛡️ Spam protection: Max {MAX_USER_CHANNELS} channels")
         
-        # Keep alive
         await idle()
         
     except KeyboardInterrupt:
@@ -660,7 +865,6 @@ async def main():
     except Exception as e:
         logger.critical(f"❌ Fatal error: {e}")
     finally:
-        # Graceful shutdown
         logger.info("🛑 Shutting down...")
         
         try:
@@ -676,15 +880,19 @@ async def main():
             pass
         
         try:
-            mongo_client.close()
+            await mongo_client.close()  # FIX: Added await
             logger.info("✅ Database connection closed")
         except:
             pass
         
         logger.info("✅ Shutdown complete")
 
+# FIX: Changed how we run the event loop
 if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Program terminated by user")
+    finally:
+        loop.close()
