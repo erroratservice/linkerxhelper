@@ -188,6 +188,46 @@ async def setup_handler(client, message):
             return
         
         LOGGER.info(f"[PERMISSION CHECK] ✅ Bot permissions verified")
+        
+        # -------------------------------------------------------------------------
+        # NEW: Check Admin Limit (Max 50)
+        # -------------------------------------------------------------------------
+        await status.edit("🔍 **Checking admin slots...**")
+        
+        current_admin_usernames = set()
+        current_count = 0
+        
+        async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
+            current_count += 1
+            if member.user and member.user.username:
+                current_admin_usernames.add(member.user.username.lower())
+        
+        # Calculate how many NEW slots we need
+        # We only count bots that are NOT already in the admin list
+        slots_needed = 0
+        for bot in Config.BOTS_TO_ADD:
+            clean_name = bot.lstrip("@").lower()
+            if clean_name not in current_admin_usernames:
+                slots_needed += 1
+        
+        # Add buffer for Helper account (if not already there)
+        # We assume 1 extra slot needed for safety if we aren't sure
+        total_projected = current_count + slots_needed + 1 
+        
+        LOGGER.info(f"[LIMIT CHECK] Current: {current_count}, Needed: {slots_needed}, Projected: {total_projected}")
+        
+        if total_projected > 50:
+            excess = total_projected - 50
+            await status.edit(
+                f"❌ **Admin Limit Exceeded**\n\n"
+                f"Telegram channels allow max **50** admins.\n\n"
+                f"📊 Current Admins: `{current_count}`\n"
+                f"🤖 Bots to Add: `{slots_needed}`\n"
+                f"⚠️ Projected Total: `{total_projected}`\n\n"
+                f"**Please remove {excess} admin(s) or bots and try again.**"
+            )
+            return
+        # -------------------------------------------------------------------------
     
     except UserNotParticipant:
         LOGGER.error(f"[PERMISSION CHECK] ❌ Bot not in channel {target_chat}")
