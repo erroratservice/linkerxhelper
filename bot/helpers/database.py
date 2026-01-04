@@ -119,9 +119,9 @@ class Database:
             total_channels = await Database.channels.count_documents({})
             unique_owners = len(await Database.channels.distinct("owner_id"))
             
-            # Total bot installations
+            # FIX: Use $ifNull to handle channels where setup isn't finished (missing installed_bots)
             pipeline = [
-                {"$project": {"bot_count": {"$size": "$installed_bots"}}},
+                {"$project": {"bot_count": {"$size": {"$ifNull": ["$installed_bots", []]}}}},
                 {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
             ]
             result = await Database.channels.aggregate(pipeline).to_list(length=1)
