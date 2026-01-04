@@ -39,6 +39,13 @@ class QueueManager:
         else:
             return f"{total_seconds // 60}m {total_seconds % 60}s"
 
+    def get_position(self, chat_id):
+        """Check if a chat is already in the queue and return its position (1-based)"""
+        for index, user in enumerate(self.waiting_users):
+            if user["chat_id"] == chat_id:
+                return index + 1
+        return None
+
     async def sync_db(self):
         """Sync ACTIVE task + WAITING list to DB for crash recovery"""
         snapshot = []
@@ -75,11 +82,16 @@ class QueueManager:
         from bot.modules.setup import setup_logic
         
         for item in saved_queue:
-            # Reconstruct the task
-            chat_id = item["chat_id"]
-            message_id = item["message_id"]
-            owner_id = item["owner_id"]
+            # Use .get() to safely handle old data that might lack keys
+            chat_id = item.get("chat_id")
+            message_id = item.get("message_id")
+            owner_id = item.get("owner_id")
             
+            # Skip corrupted/old entries
+            if not chat_id or not message_id:
+                LOGGER.warning(f"Skipping invalid queue entry: {item}")
+                continue
+
             # Create a VirtualMessage so setup_logic can call .edit()
             v_msg = VirtualMessage(chat_id, message_id)
             
@@ -138,7 +150,7 @@ class QueueManager:
         for i, req in enumerate(current_users):
             try:
                 # Use getattr to safely handle VirtualMessage vs Pyrogram Message
-                msg_id = getattr(req["msg"], "id", None)
+                # msg_id = getattr(req["msg"], "id", None)
                 
                 if i == 0:
                     await req["msg"].edit("🔄 **You're Next!**\n⚙️ Starting setup now...")
@@ -191,7 +203,7 @@ class QueueManager:
             await self.sync_db()
             
             self.queue.task_done()
-            LOGGER.info("⏳ Cooling down for 15s before next task...")
-            await asyncio.sleep(15)
+            LOGGER.info("⏳ Cooling down for 10s before next task...")
+            await asyncio.sleep(10)
 
 queue_manager = QueueManager()
