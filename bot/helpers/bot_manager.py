@@ -16,7 +16,11 @@ from bot.utils.logger import LOGGER
 class BotManager:
     @staticmethod
     async def process_bots(chat_id, action, bots_list, status_msg=None):
-        """Add or remove bots from channel with retry logic, rate limiting, and smart skipping"""
+        """
+        Add/Remove bots using Hybrid Approach:
+        - READ (Fetch Admins): Done by BOT (Save User limits)
+        - WRITE (Add/Promote): Done by USERBOT (Bot API restrictions)
+        """
         if not bots_list:
             return [], []
         
@@ -28,19 +32,19 @@ class BotManager:
             can_delete_messages=True
         )
         
-        # --- OPTIMIZATION: Fetch existing admins to skip redundant processing ---
+        # --- OPTIMIZATION: Fetch existing admins using BOT client ---
+        # We offload this 'Read' operation to the Bot to save Userbot limits
         existing_admins = set()
         if action == "add":
             try:
-                LOGGER.info(f"[BOT_MANAGER] Fetching existing admins to optimize setup...")
-                async for member in Clients.user_app.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS):
+                LOGGER.info(f"[BOT_MANAGER] Fetching existing admins (via Bot)...")
+                async for member in Clients.bot.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS):
                     if member.user and member.user.username:
-                        # Store as lowercase without @ for comparison
                         existing_admins.add(member.user.username.lower())
-                LOGGER.info(f"[BOT_MANAGER] Found {len(existing_admins)} existing admins. Checking overlap...")
+                LOGGER.info(f"[BOT_MANAGER] Found {len(existing_admins)} existing admins.")
             except Exception as e:
-                LOGGER.warning(f"[BOT_MANAGER] Could not fetch existing admins (Optimization skipped): {e}")
-        # -------------------------------------------------------------------------
+                LOGGER.warning(f"[BOT_MANAGER] Could not fetch admins: {e}")
+        # -------------------------------------------------------------
 
         LOGGER.info(f"[BOT_MANAGER] Processing {len(bots_list)} bots with {Config.SYNC_ACTION_DELAY}s delay")
         
@@ -60,23 +64,23 @@ class BotManager:
                 except Exception:
                     pass
 
-            # --- OPTIMIZATION CHECK ---
+            # --- SMART SKIP CHECK ---
             if action == "add":
                 clean_name = username.lstrip("@").lower()
                 if clean_name in existing_admins:
                     LOGGER.info(f"[BOT_MANAGER] ⏩ {username} is already admin. Skipping.")
                     success.append(username)
-                    continue  # Skip to next bot without delay
-            # ---------------------------
+                    continue  # Skip API calls completely
+            # ------------------------
 
-            # 2. Process Bot
+            # 2. Process Bot (Using USERBOT)
             delay_applied = False
             
             try:
                 if action == "add":
                     LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Adding {username}")
                     
-                    # Step A: Try Adding as Member
+                    # Step A: Try Adding (Must be Userbot)
                     try:
                         await Clients.user_app.add_chat_members(chat_id, username)
                         await asyncio.sleep(0.5)
@@ -85,7 +89,7 @@ class BotManager:
                     except Exception as e:
                         LOGGER.debug(f"Add member failed ({username}): {e}")
 
-                    # Step B: Try Promoting with Extended Retry Logic
+                    # Step B: Try Promoting (Must be Userbot)
                     max_retries = 6
                     for attempt in range(max_retries):
                         try:
@@ -96,28 +100,17 @@ class BotManager:
                             )
                             success.append(username)
                             LOGGER.info(f"[BOT_MANAGER] ✅ {username} promoted")
-                            break # Success, exit retry loop
+                            break # Success
                             
                         except RightForbidden:
-                            # 403: Bot is already admin (protected by owner or other admin)
-                            # We double check if it really is an admin
-                            try:
-                                m = await Clients.user_app.get_chat_member(chat_id, username)
-                                if m.status == ChatMemberStatus.ADMINISTRATOR:
-                                    LOGGER.warning(f"[BOT_MANAGER] ⚠️ {username} is already admin (Owner protected). Skipping.")
-                                    success.append(username) 
-                                    break
-                            except:
-                                pass
-                            
-                            LOGGER.error(f"[BOT_MANAGER] ❌ Permission denied for {username}")
-                            failed.append(username)
+                            # 403: Bot likely already admin (protected)
+                            success.append(username)
                             break
                             
                         except ChatAdminRequired:
                             # 400: Helper not recognized as admin yet
                             if attempt < max_retries - 1:
-                                LOGGER.warning(f"[BOT_MANAGER] 🔄 ChatAdminRequired for {username}, retrying in 5s... (Attempt {attempt+1}/{max_retries})")
+                                LOGGER.warning(f"[BOT_MANAGER] 🔄 ChatAdminRequired, retrying... ({attempt+1}/{max_retries})")
                                 await asyncio.sleep(5)
                             else:
                                 LOGGER.error(f"[BOT_MANAGER] ❌ Failed {username} after retries")
@@ -127,7 +120,6 @@ class BotManager:
                             LOGGER.warning(f"[BOT_MANAGER] ⏳ FloodWait {fw.value}s")
                             await asyncio.sleep(fw.value + 2)
                             delay_applied = True
-                            # Retry loop continues
                             
                         except Exception as e:
                             LOGGER.error(f"[BOT_MANAGER] ❌ Error {username}: {e}")
@@ -135,7 +127,7 @@ class BotManager:
                             break
 
                 elif action == "remove":
-                    LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Removing {username}")
+                    LOGGER.info(f"[BOT_MANAGER] Removing {username}")
                     try:
                         await Clients.user_app.promote_chat_member(
                             chat_id, username, privileges=ChatPrivileges()
@@ -149,8 +141,7 @@ class BotManager:
                         failed.append(username)
 
             finally:
-                # Safety Delay between bots
-                # Only apply delay if we actually performed an action (did not skip)
+                # Safety Delay
                 if not delay_applied and i < len(bots_list) - 1:
                     await asyncio.sleep(Config.SYNC_ACTION_DELAY)
 
