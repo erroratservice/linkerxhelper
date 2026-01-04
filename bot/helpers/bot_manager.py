@@ -1,7 +1,14 @@
 import asyncio
 import time
 from pyrogram.types import ChatPrivileges
-from pyrogram.errors import FloodWait, ChatAdminRequired, UserAlreadyParticipant
+from pyrogram.enums import ChatMemberStatus
+from pyrogram.errors import (
+    FloodWait, 
+    ChatAdminRequired, 
+    UserAlreadyParticipant, 
+    RightForbidden,
+    UserNotParticipant
+)
 from bot.client import Clients
 from config import Config
 from bot.utils.logger import LOGGER
@@ -9,26 +16,24 @@ from bot.utils.logger import LOGGER
 class BotManager:
     @staticmethod
     async def process_bots(chat_id, action, bots_list, status_msg=None):
-        """Add or remove bots from channel with guaranteed safety delays"""
+        """Add or remove bots from channel with retry logic and rate limiting"""
         if not bots_list:
             return [], []
         
         success, failed = [], []
         
-        # Minimal privileges for bots - ONLY message management
         privileges = ChatPrivileges(
-            can_post_messages=True,      # Post messages in channel
-            can_edit_messages=True,       # Edit messages
-            can_delete_messages=True      # Delete messages
+            can_post_messages=True,
+            can_edit_messages=True,
+            can_delete_messages=True
         )
         
-        LOGGER.info(f"[BOT_MANAGER] Processing {len(bots_list)} bots with {Config.SYNC_ACTION_DELAY}s delay between each")
+        LOGGER.info(f"[BOT_MANAGER] Processing {len(bots_list)} bots with {Config.SYNC_ACTION_DELAY}s delay")
         
-        # Track last update time to prevent FloodWait
         last_update_time = 0
         
         for i, username in enumerate(bots_list):
-            # Update status message (Rate limited: every 15s)
+            # 1. Update Status Message (Every 15s)
             current_time = time.time()
             if status_msg and (current_time - last_update_time >= 15):
                 try:
@@ -38,94 +43,90 @@ class BotManager:
                         f"📊 Progress: {i+1}/{len(bots_list)}"
                     )
                     last_update_time = current_time
-                except Exception as e:
-                    # Ignore update errors (message might be deleted or too old)
-                    LOGGER.debug(f"Status update skipped: {e}")
-            
-            # Flag to track if we need to apply delay
+                except Exception:
+                    pass
+
+            # 2. Process Bot
             delay_applied = False
             
             try:
                 if action == "add":
-                    LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Adding {username} to {chat_id}")
+                    LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Adding {username}")
                     
-                    # Step 1: Try to add bot as member first
+                    # Try Adding
                     try:
                         await Clients.user_app.add_chat_members(chat_id, username)
-                        LOGGER.info(f"[BOT_MANAGER] Added {username} as member")
-                        await asyncio.sleep(0.5)  # Small delay between add and promote
+                        await asyncio.sleep(0.5)
                     except UserAlreadyParticipant:
-                        LOGGER.info(f"[BOT_MANAGER] {username} already in channel")
+                        pass
                     except Exception as e:
-                        LOGGER.debug(f"[BOT_MANAGER] add_chat_members({username}) error: {e}")
-                        # Bot might already be in channel, continue to promote
-                    
-                    # Step 2: Promote to admin with minimal privileges
-                    LOGGER.info(f"[BOT_MANAGER] Promoting {username} with message management rights")
-                    await Clients.user_app.promote_chat_member(
-                        chat_id, 
-                        username, 
-                        privileges=privileges
-                    )
-                    success.append(username)
-                    LOGGER.info(f"[BOT_MANAGER] ✅ {username} promoted successfully")
-                
+                        LOGGER.debug(f"Add member failed ({username}): {e}")
+
+                    # Try Promoting with Retry Logic
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            await Clients.user_app.promote_chat_member(
+                                chat_id, 
+                                username, 
+                                privileges=privileges
+                            )
+                            success.append(username)
+                            LOGGER.info(f"[BOT_MANAGER] ✅ {username} promoted")
+                            break # Success, exit retry loop
+                            
+                        except RightForbidden:
+                            # 403: We probably can't edit this bot because owner added it
+                            # Check if it is ALREADY an admin
+                            try:
+                                m = await Clients.user_app.get_chat_member(chat_id, username)
+                                if m.status == ChatMemberStatus.ADMINISTRATOR:
+                                    LOGGER.warning(f"[BOT_MANAGER] ⚠️ {username} is already admin (Owner protected). Skipping.")
+                                    success.append(username) # Count as success since it is there
+                                    break
+                            except:
+                                pass
+                            
+                            LOGGER.error(f"[BOT_MANAGER] ❌ Permission denied for {username}")
+                            failed.append(username)
+                            break
+                            
+                        except ChatAdminRequired:
+                            # 400: Helper not recognized as admin yet?
+                            if attempt < max_retries - 1:
+                                LOGGER.warning(f"[BOT_MANAGER] 🔄 ChatAdminRequired for {username}, retrying in 3s...")
+                                await asyncio.sleep(3)
+                            else:
+                                LOGGER.error(f"[BOT_MANAGER] ❌ Failed {username} after retries")
+                                failed.append(username)
+                        
+                        except FloodWait as fw:
+                            LOGGER.warning(f"[BOT_MANAGER] ⏳ FloodWait {fw.value}s")
+                            await asyncio.sleep(fw.value + 1)
+                            delay_applied = True
+                            # Don't break, retry loop continues
+                            
+                        except Exception as e:
+                            LOGGER.error(f"[BOT_MANAGER] ❌ Error {username}: {e}")
+                            failed.append(username)
+                            break
+
                 elif action == "remove":
-                    LOGGER.info(f"[BOT_MANAGER] [{i+1}/{len(bots_list)}] Removing {username} from {chat_id}")
-                    
-                    # Demote to regular member (removes all admin rights)
-                    await Clients.user_app.promote_chat_member(
-                        chat_id, 
-                        username, 
-                        privileges=ChatPrivileges()  # Empty = no permissions
-                    )
-                    
-                    # Remove from channel
-                    await Clients.user_app.ban_chat_member(chat_id, username)
-                    await Clients.user_app.unban_chat_member(chat_id, username)
-                    success.append(username)
-                    LOGGER.info(f"[BOT_MANAGER] ✅ {username} removed successfully")
-            
-            except FloodWait as fw:
-                LOGGER.warning(f"[BOT_MANAGER] ⏳ FloodWait {fw.value}s for {username}")
-                await asyncio.sleep(fw.value + 1)
-                delay_applied = True  # FloodWait delay counts as our delay
-                
-                # Retry after FloodWait
-                try:
-                    if action == "add":
+                    # ... (Remove logic remains largely the same, usually less prone to errors)
+                    try:
                         await Clients.user_app.promote_chat_member(
-                            chat_id, 
-                            username, 
-                            privileges=privileges
+                            chat_id, username, privileges=ChatPrivileges()
                         )
+                        await Clients.user_app.ban_chat_member(chat_id, username)
+                        await Clients.user_app.unban_chat_member(chat_id, username)
                         success.append(username)
-                        LOGGER.info(f"[BOT_MANAGER] ✅ {username} promoted after FloodWait")
-                    else:
-                        await Clients.user_app.promote_chat_member(
-                            chat_id, 
-                            username, 
-                            privileges=ChatPrivileges()
-                        )
-                        success.append(username)
-                        LOGGER.info(f"[BOT_MANAGER] ✅ {username} demoted after FloodWait")
-                except Exception as e:
-                    LOGGER.error(f"[BOT_MANAGER] ❌ Retry failed for {username}: {e}")
-                    failed.append(username)
-            
-            except ChatAdminRequired as e:
-                LOGGER.error(f"[BOT_MANAGER] ❌ ChatAdminRequired for {username}: {e}")
-                failed.append(username)
-            
-            except Exception as e:
-                LOGGER.error(f"[BOT_MANAGER] ❌ Failed {username}: {type(e).__name__} - {e}")
-                failed.append(username)
-            
+                    except Exception as e:
+                        LOGGER.error(f"Remove failed {username}: {e}")
+                        failed.append(username)
+
             finally:
-                # CRITICAL: Always apply delay between bots (unless FloodWait already applied one)
-                if not delay_applied and i < len(bots_list) - 1:  # Skip delay after last bot
-                    LOGGER.info(f"[BOT_MANAGER] ⏳ Safety delay: {Config.SYNC_ACTION_DELAY}s before next bot")
+                # Safety Delay
+                if not delay_applied and i < len(bots_list) - 1:
                     await asyncio.sleep(Config.SYNC_ACTION_DELAY)
-        
-        LOGGER.info(f"[BOT_MANAGER] ✅ Completed: {len(success)} success, {len(failed)} failed")
+
         return success, failed
