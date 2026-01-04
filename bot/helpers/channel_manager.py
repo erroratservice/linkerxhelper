@@ -7,7 +7,7 @@ from pyrogram.errors import (
     PeerIdInvalid,
     UsernameInvalid,
     FloodWait,
-    UserAlreadyParticipant  # <--- Added this missing import
+    UserAlreadyParticipant
 )
 from bot.client import Clients
 from bot.utils.logger import LOGGER
@@ -29,8 +29,8 @@ class ChannelManager:
             return False
 
     @staticmethod
-    async def add_helper_to_channel(chat_id):
-        """Add helper to channel using invite link with FloodWait handling"""
+    async def add_helper_to_channel(chat_id, status_msg=None):
+        """Add helper to channel using invite link with FloodWait handling and notification"""
         LOGGER.info(f"[ADD_HELPER] Starting for channel {chat_id}")
         
         # Get helper's user ID
@@ -50,8 +50,30 @@ class ChannelManager:
                     LOGGER.info(f"[ADD_HELPER] ✅ Helper joined via invite link")
                     break
                 except FloodWait as e:
+                    wait_time = e.value + 2
                     LOGGER.warning(f"[ADD_HELPER] ⏳ FloodWait {e.value}s during join. Sleeping...")
-                    await asyncio.sleep(e.value + 2)
+                    
+                    # Notify user if the wait is significant (>5s) and we have the message object
+                    if status_msg and wait_time > 5:
+                        try:
+                            await status_msg.edit(
+                                f"⏳ **Telegram Rate Limit Hit**\n\n"
+                                f"The Helper account has joined too many channels recently.\n"
+                                f"😴 **Sleeping for {wait_time} seconds...**\n"
+                                f"The setup will resume automatically after this break."
+                            )
+                        except:
+                            pass
+                            
+                    await asyncio.sleep(wait_time)
+                    
+                    # Restore status message after waking up
+                    if status_msg and wait_time > 5:
+                        try:
+                            await status_msg.edit("🏃 **Resuming setup...**")
+                        except:
+                            pass
+                            
                 except UserAlreadyParticipant:
                     LOGGER.info("[ADD_HELPER] Helper already in channel.")
                     break
