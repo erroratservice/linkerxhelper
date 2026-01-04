@@ -50,6 +50,9 @@ async def main():
         # Start background tasks
         asyncio.create_task(queue_manager.worker())
         asyncio.create_task(ping_server())
+        # Send restart notification if this was a restart
+        from bot.modules.restart import send_restart_notification
+        asyncio.create_task(send_restart_notification())        
         
         LOGGER.info("🚀 LinkerX service ready")
         LOGGER.info(f"📝 Configured with {len(Config.BOTS_TO_ADD)} bots to install")
