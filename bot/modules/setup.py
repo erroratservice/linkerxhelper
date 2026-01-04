@@ -104,42 +104,33 @@ async def setup_logic(message, chat_id, owner_id):
         LOGGER.error(f"=" * 60)
         raise
 
-@Clients.bot.on_message(filters.command("setup") & filters.private)
+@Clients.bot.on_message(filters.command("setup") & (filters.group | filters.channel))
 async def setup_handler(client, message):
-    """Setup command handler"""
-    LOGGER.info(f"[SETUP CMD] Received from user {message.from_user.id}")
+    """Setup command handler - Works in Groups/Channels only"""
     
-    if len(message.command) < 2:
-        await message.reply_text(
-            "❌ **Invalid format**\n\n"
-            "Usage: `/setup <channel_id>`\n\n"
-            "💡 Tip: Use @username_to_id_bot to get your channel ID"
-        )
+    # Identify the user (Owner)
+    if not message.from_user:
+        await message.reply_text("❌ Please run this command as a user (disable anonymous admin) so I can link this channel to your account.")
         return
+        
+    owner_id = message.from_user.id
+    target_chat = message.chat.id
     
-    raw_id = message.command[1]
-    LOGGER.info(f"[SETUP CMD] Raw channel ID: {raw_id}")
-    
-    try:
-        target_chat = int(raw_id) if raw_id.lstrip("-").isdigit() else raw_id
-        LOGGER.info(f"[SETUP CMD] Parsed channel ID: {target_chat}")
-    except Exception as e:
-        LOGGER.error(f"[SETUP CMD] Failed to parse channel ID: {e}")
-        await message.reply_text("❌ Invalid channel ID format. Please check and try again.")
-        return
+    LOGGER.info(f"[SETUP CMD] Received in chat {target_chat} from user {owner_id}")
     
     status = await message.reply_text("🔍 **Checking bot permissions...**")
     
-    # Check bot permissions with detailed logging - FIX: Use enum comparison
+    # Check bot permissions with detailed logging
     try:
         LOGGER.info(f"[PERMISSION CHECK] Checking bot permissions in {target_chat}")
         member = await Clients.bot.get_chat_member(target_chat, "me")
         LOGGER.info(f"[PERMISSION CHECK] Bot status: {member.status}")
         LOGGER.info(f"[PERMISSION CHECK] Bot privileges: {member.privileges}")
         
-        # FIX: Compare enum properly
+        # Check if Admin or Owner
         is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
-        has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False))
+        # Check for Promote permission
+        has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False)) if member.privileges else False
         
         LOGGER.info(f"[PERMISSION CHECK] is_admin: {is_admin}, can_promote_members: {has_promote_flag}")
         
@@ -149,7 +140,7 @@ async def setup_handler(client, message):
             bot_mention = f"@{bot_username}" if bot_username else "the bot"
             await status.edit(
                 f"⚠️ **Missing permissions!**\n\n"
-                f"{bot_mention} must be an admin in the channel with **Add New Admins** permission enabled.\n\n"
+                f"{bot_mention} must be an admin in this channel with **Add New Admins** permission enabled.\n\n"
                 f"Please update permissions and try again."
             )
             return
@@ -168,13 +159,12 @@ async def setup_handler(client, message):
         LOGGER.info(f"[PERMISSION CHECK] ✅ Bot permissions verified")
     
     except UserNotParticipant:
+        # This shouldn't theoretically happen if the bot is replying to a command in the channel, 
+        # but safe to handle.
         LOGGER.error(f"[PERMISSION CHECK] ❌ Bot not in channel {target_chat}")
-        bot_username = await Clients.get_bot_username()
-        bot_mention = f"@{bot_username}" if bot_username else "the bot"
         await status.edit(
             f"⚠️ **Bot not in channel!**\n\n"
-            f"Please add {bot_mention} to the channel first,\n"
-            f"then promote it to admin with **Add New Admins** permission."
+            f"Please ensure the bot is added to the channel properly."
         )
         return
     
@@ -186,7 +176,7 @@ async def setup_handler(client, message):
     # Add to queue for processing
     LOGGER.info(f"[QUEUE] Adding {target_chat} to processing queue")
     try:
-        await queue_manager.add_to_queue(status, target_chat, message.from_user.id, setup_logic)
+        await queue_manager.add_to_queue(status, target_chat, owner_id, setup_logic)
         LOGGER.info(f"[QUEUE] ✅ Added to queue successfully")
     except Exception as e:
         LOGGER.error(f"[QUEUE] ❌ Failed to add to queue: {e}")
