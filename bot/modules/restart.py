@@ -19,6 +19,7 @@ def sanitize_url(url):
 def run_git_command(cmd):
     """Run git command safely using subprocess"""
     try:
+        # Use subprocess for better output handling and safety
         result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
         return result.decode().strip()
     except subprocess.CalledProcessError as e:
@@ -128,7 +129,7 @@ async def perform_restart(chat_id, message_id, status="success", error=None):
         LOGGER.info("=" * 60)
         
         await asyncio.sleep(0.5)
-        # FIX: Point to bot.py specifically
+        # FIX: Point to bot.py specifically to avoid __main__ error
         os.execv(sys.executable, [sys.executable, "bot.py"])
         
     except Exception as e:
