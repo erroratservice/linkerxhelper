@@ -7,8 +7,6 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import ChatPrivileges
 from pyrogram.errors import (
     UserNotParticipant,
-    PeerIdInvalid,
-    UsernameInvalid,
     FloodWait
 )
 
@@ -20,15 +18,13 @@ USER_SESSION = os.environ.get("USER_SESSION")
 MONGO_URL = os.environ.get("MONGO_URL")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# Convert CSV to list, remove empty strings
+# Config
 BOTS_TO_ADD = [b.strip() for b in os.environ.get("BOTS_TO_ADD", "GroupHelpBot").split(",") if b.strip()]
-
-# Safety Delays
-SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10)) # Seconds between channels in sync
-SYNC_ACTION_DELAY = 3 # Seconds between adding bots in setup
-
 PORT = int(os.environ.get("PORT", 8080))
 URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
+
+# Global Variable to store the User Session Username
+HELPER_USERNAME = "LinkerX_Helper" 
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -43,226 +39,210 @@ channels_col = db["channels"]
 bot = Client("bot_client", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 user_app = Client("user_client", api_id=API_ID, api_hash=API_HASH, session_string=USER_SESSION, in_memory=True)
 
-# --- WEB SERVER ---
-async def health_check(request):
-    return web.Response(text="LinkerX is Alive")
+# --- QUEUE SYSTEM ---
+class QueueManager:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.waiting_users = [] 
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Web server started on port {PORT}")
+    async def add_to_queue(self, message, target_chat):
+        request_data = {'msg': message, 'chat_id': target_chat}
+        self.waiting_users.append(request_data)
+        
+        position = len(self.waiting_users)
+        await message.edit(f"⏳ **Added to Queue**\nPosition: #{position}\nPlease wait...")
+        await self.queue.put(request_data)
 
-async def ping_server():
-    while True:
-        await asyncio.sleep(600)
-        try:
-            async with ClientSession() as session:
-                async with session.get(URL) as resp:
-                    pass
-        except:
-            pass
+    async def update_positions(self):
+        if not self.waiting_users: return
+        for i, req in enumerate(self.waiting_users):
+            try:
+                if i == 0: await req['msg'].edit("🔄 **Queue Update:**\nYou are Next! Starting soon...")
+                else: await req['msg'].edit(f"⏳ **Queue Update:**\nCurrent Position: #{i + 1}")
+            except: pass
 
-# --- CORE LOGIC: Add/Remove Bots with Status Callback ---
-async def process_channel_bots(chat_id, action, bots_list, status_msg=None, current_step=0, total_steps=0):
-    """
-    Handles adding/removing bots.
-    If status_msg is provided, it updates the message with progress.
-    """
-    if not bots_list:
-        return [], []
+    async def worker(self):
+        logger.info("Queue Worker Started")
+        while True:
+            request_data = await self.queue.get()
+            if request_data in self.waiting_users: self.waiting_users.remove(request_data)
+            asyncio.create_task(self.update_positions())
 
-    success = []
-    failed = []
+            message = request_data['msg']
+            chat_id = request_data['chat_id']
+            
+            try:
+                await message.edit("⚙️ **Processing Started...**")
+                await setup_logic(message, chat_id)
+            except Exception as e:
+                logger.error(f"Worker Error: {e}")
+                try: await message.edit(f"❌ Error during processing: {e}")
+                except: pass
+            
+            self.queue.task_done()
+            await asyncio.sleep(2) 
 
+queue_manager = QueueManager()
+
+# --- HELPER LOGIC ---
+async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
+    if not bots_list: return [], []
+    success, failed = [], []
     privileges = ChatPrivileges(
-        can_manage_chat=True,
-        can_delete_messages=True,
-        can_restrict_members=True,
-        can_promote_members=False,
-        can_invite_users=True,
-        can_pin_messages=True
+        can_manage_chat=True, can_delete_messages=True, can_restrict_members=True,
+        can_promote_members=False, can_invite_users=True, can_pin_messages=True
     )
 
     for i, username in enumerate(bots_list):
-        # Update User Interface (if msg provided)
         if status_msg:
-            try:
-                # E.g. "🔄 Setting up LinkerX...\nProcessing: BotName (2/5)"
-                await status_msg.edit(
-                    f"🔄 **Setting up LinkerX...**\n"
-                    f"Action: {action.title()}ing Bots\n"
-                    f"🤖 Current: `{username}` ({i+1}/{len(bots_list)})"
-                )
-            except Exception:
-                pass # Ignore "message not modified" errors
+            try: await status_msg.edit(f"⚙️ **Processing...**\nBot: `{username}` ({i+1}/{len(bots_list)})")
+            except: pass
 
         try:
             if action == 'add':
                 try: await user_app.add_chat_members(chat_id, username)
                 except: pass
-                
-                await asyncio.sleep(0.5) # Slight pause before promote
+                await asyncio.sleep(0.5)
                 await user_app.promote_chat_member(chat_id, username, privileges=privileges)
                 success.append(username)
-                
             elif action == 'remove':
                 await user_app.promote_chat_member(chat_id, username, privileges=ChatPrivileges(can_manage_chat=False))
                 await user_app.ban_chat_member(chat_id, username)
                 await user_app.unban_chat_member(chat_id, username)
                 success.append(username)
-
-            # FloodWait Protection
-            await asyncio.sleep(SYNC_ACTION_DELAY)
-
+            await asyncio.sleep(2)
         except FloodWait as fw:
-            await asyncio.sleep(fw.value)
-            # Retry once after sleep
-            try:
-                 # (Simplified retry logic just for promote for brevity)
-                 await user_app.promote_chat_member(chat_id, username, privileges=privileges)
-                 success.append(username)
-            except:
-                 failed.append(username)
-        except Exception as e:
-            logger.error(f"Failed {username} in {chat_id}: {e}")
-            failed.append(username)
-
+            await asyncio.sleep(fw.value + 1)
+            try: 
+                await user_app.promote_chat_member(chat_id, username, privileges=privileges)
+                success.append(username)
+            except: failed.append(username)
+        except: failed.append(username)
     return success, failed
+
+async def setup_logic(message, target_chat):
+    successful, failed = await process_channel_bots(target_chat, 'add', BOTS_TO_ADD, message)
+    await channels_col.update_one(
+        {"channel_id": target_chat},
+        {"$set": {"channel_id": target_chat, "owner_id": message.chat.id, "installed_bots": successful}},
+        upsert=True
+    )
+    text = f"✅ **Setup Complete!**\nAdded: {len(successful)}/{len(BOTS_TO_ADD)}"
+    if failed: text += f"\nFailed: {', '.join(failed)}"
+    await message.edit(text)
 
 # --- COMMANDS ---
 
-@bot.on_message(filters.command("setup") & filters.private)
-async def setup_handler(client, message):
-    try:
-        if len(message.command) < 2:
-            await message.reply_text("❌ Usage: `/setup <channel_id>`")
-            return
-        target_input = message.command[1]
-        target_chat = int(target_input) if target_input.lstrip("-").isdigit() else target_input
-    except:
-        await message.reply_text("❌ Invalid ID.")
-        return
-
-    status_msg = await message.reply_text("⏳ **Verifying permissions...**")
-
-    # 1. Verify Permissions
-    try:
-        member = await user_app.get_chat_member(target_chat, "me")
-        can_promote = member.status == "creator" or (
-            member.status == "administrator" and member.privileges and member.privileges.can_promote_members
-        )
-        if not can_promote:
-            await status_msg.edit("⚠️ **Missing Permissions!**\nUser account must be Admin with 'Add New Admins' rights.")
-            return
-    except UserNotParticipant:
-        await status_msg.edit("⚠️ **User Account Not Found!**\nPlease add the bot's user account to the channel first.")
-        return
-    except Exception as e:
-        await status_msg.edit(f"❌ **Error:** {e}")
-        return
-
-    # 2. Process Bots with Live Updates
-    successful, failed = await process_channel_bots(target_chat, 'add', BOTS_TO_ADD, status_msg)
-
-    # 3. Update DB
-    await channels_col.update_one(
-        {"channel_id": target_chat},
-        {
-            "$set": {
-                "channel_id": target_chat,
-                "owner_id": message.from_user.id,
-                "installed_bots": successful
-            }
-        },
-        upsert=True
+@bot.on_message(filters.command("start") & filters.private)
+async def start_handler(client, message):
+    # Dynamic username used here
+    helper_mention = f"@{HELPER_USERNAME}" if HELPER_USERNAME else "the LinkerX Account"
+    
+    await message.reply_text(
+        f"👋 **Welcome to LinkerX Service Setup!**\n\n"
+        f"I can configure your channel with the required bots automatically.\n\n"
+        f"**🚀 Setup Instructions:**\n"
+        f"1. **Add** this user to your channel:\n"
+        f"   👉 `{helper_mention}` (Click to copy)\n\n"
+        f"2. **Promote** it to Admin with:\n"
+        f"   ✅ __'Add New Admins'__ permission enabled.\n\n"
+        f"3. **Get your Channel ID** from @username_to_id_bot\n\n"
+        f"4. **Run the command:**\n"
+        f"   `/setup <channel_id>`\n"
+        f"   Example: `/setup -100123456789`"
     )
 
-    # 4. Final Report
-    report_text = f"✅ **Setup Complete!**\n\n"
-    report_text += f"📢 Channel: `{target_chat}`\n"
-    report_text += f"🤖 Added: {len(successful)}/{len(BOTS_TO_ADD)}\n"
-    
-    if failed:
-        report_text += f"⚠️ Failed: {', '.join(failed)}\n(Check if bots are valid or already admins)"
+@bot.on_message(filters.command("setup") & filters.private)
+async def setup_handler(client, message):
+    if len(message.command) < 2:
+        await message.reply_text("❌ **Invalid Format**\nUsage: `/setup <channel_id>`\nTip: Use @username_to_id_bot for IDs.")
+        return
 
-    await status_msg.edit(report_text)
+    raw_id = message.command[1]
+    try:
+        target_chat = int(raw_id) if raw_id.lstrip("-").isdigit() else raw_id
+    except:
+        await message.reply_text("❌ Invalid ID format.")
+        return
+
+    status_msg = await message.reply_text("🔍 **Checking permissions...**")
+
+    try:
+        member = await user_app.get_chat_member(target_chat, "me")
+        if not (member.status == "creator" or (member.privileges and member.privileges.can_promote_members)):
+            await status_msg.edit("⚠️ **Missing Permissions!**\nPlease enable **'Add New Admins'** for the user account.")
+            return
+    except UserNotParticipant:
+        await status_msg.edit(f"⚠️ **User Not Found!**\nPlease add `@{HELPER_USERNAME}` to the channel first.")
+        return
+    except Exception as e:
+        await status_msg.edit(f"❌ Error: {e}")
+        return
+
+    await queue_manager.add_to_queue(status_msg, target_chat)
 
 @bot.on_message(filters.command("sync") & filters.user(OWNER_ID))
 async def sync_all_channels(client, message):
-    status_msg = await message.reply_text("🔄 **Initializing Global Sync...**")
-    
-    wanted_bots = set(BOTS_TO_ADD)
+    status_msg = await message.reply_text("🔄 **Global Sync Started...**")
     processed = 0
-    errors = 0
-    total_channels = await channels_col.count_documents({})
     
-    msg_update_interval = 5 # Update status msg every 5 channels
-    current_idx = 0
-
     async for doc in channels_col.find():
-        current_idx += 1
         chat_id = doc['channel_id']
-        current_bots = set(doc.get('installed_bots', []))
+        current = set(doc.get('installed_bots', []))
+        wanted = set(BOTS_TO_ADD)
         
-        to_add = list(wanted_bots - current_bots)
-        to_remove = list(current_bots - wanted_bots)
-        
-        # Periodic Status Update
-        if current_idx % msg_update_interval == 0 or current_idx == 1:
+        if (wanted - current) or (current - wanted):
             try:
-                percent = int((current_idx / total_channels) * 100)
-                await status_msg.edit(
-                    f"🔄 **Global Sync Running**\n"
-                    f"📊 Progress: {percent}%\n"
-                    f"📺 Channel: {current_idx}/{total_channels}\n"
-                    f"✅ Updated: {processed} | ❌ Errors: {errors}"
-                )
-            except: pass
+                s_add, _ = await process_channel_bots(chat_id, 'add', list(wanted - current))
+                s_rem, _ = await process_channel_bots(chat_id, 'remove', list(current - wanted))
+                new_state = list((current - set(s_rem)) | set(s_add))
+                await channels_col.update_one({"channel_id": chat_id}, {"$set": {"installed_bots": new_state}})
+                processed += 1
+                await asyncio.sleep(5) 
+            except Exception: pass
+            
+            if processed % 5 == 0: await status_msg.edit(f"🔄 **Syncing...**\nUpdated: {processed}")
 
-        if not to_add and not to_remove:
-            continue
+    await status_msg.edit(f"✅ **Sync Finished!**\nTotal Updated: {processed}")
 
+# --- SERVER & RUN ---
+async def health_check(request): return web.Response(text="Alive")
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+
+async def ping():
+    while True:
+        await asyncio.sleep(600)
         try:
-            # We don't pass status_msg here because we don't want granular updates per bot during sync (too spammy)
-            added_success, _ = await process_channel_bots(chat_id, 'add', to_add)
-            removed_success, _ = await process_channel_bots(chat_id, 'remove', to_remove)
-            
-            new_state = list((current_bots - set(removed_success)) | set(added_success))
-            
-            await channels_col.update_one(
-                {"channel_id": chat_id},
-                {"$set": {"installed_bots": new_state}}
-            )
-            processed += 1
-            
-            # Sleep between channels
-            await asyncio.sleep(SYNC_CHANNEL_DELAY)
-
-        except Exception as e:
-            errors += 1
-            logger.error(f"Sync error {chat_id}: {e}")
-            # Notify Owner (Optional)
-            try:
-                await bot.send_message(doc['owner_id'], f"⚠️ **LinkerX**: Sync failed for your channel `{chat_id}`. Please check permissions.")
-            except: pass
-
-    await status_msg.edit(
-        f"✅ **Global Sync Finished**\n\n"
-        f"📂 Total Channels: {total_channels}\n"
-        f"📝 Updated: {processed}\n"
-        f"⚠️ Errors: {errors}"
-    )
+             async with ClientSession() as session:
+                async with session.get(URL) as resp: pass
+        except: pass
 
 async def main():
-    await start_web_server()
+    global HELPER_USERNAME
+    await start_web()
+    
+    # Start Clients
     await bot.start()
     await user_app.start()
-    asyncio.create_task(ping_server())
-    logger.info("LinkerX Ultimate Started.")
+    
+    # --- FETCH USERNAME HERE ---
+    try:
+        me = await user_app.get_me()
+        HELPER_USERNAME = me.username
+        logger.info(f"User Session detected as: @{HELPER_USERNAME}")
+    except Exception as e:
+        logger.error(f"Could not fetch User Session username: {e}")
+    # ---------------------------
+
+    asyncio.create_task(queue_manager.worker())
+    asyncio.create_task(ping())
+    
+    logger.info("LinkerX Service Ready.")
     await idle()
     await bot.stop()
     await user_app.stop()
