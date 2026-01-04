@@ -39,9 +39,9 @@ async def setup_logic(message, chat_id, owner_id):
                 LOGGER.error(f"[STEP 2] ❌ FAILED to add helper: {type(e).__name__} - {e}")
                 raise
             
-            # INCREASED DELAY: Give Telegram 5 seconds to sync admin rights
-            LOGGER.info("[STEP 2] ⏳ Waiting 5s for permissions to propagate...")
-            await asyncio.sleep(5)
+            # INCREASED DELAY: Changed from 5s to 15s to guarantee propagation
+            LOGGER.info("[STEP 2] ⏳ Waiting 15s for permissions to propagate...")
+            await asyncio.sleep(15)
         else:
             LOGGER.info(f"[STEP 2] Helper already in channel, skipping add")
         
@@ -65,7 +65,6 @@ async def setup_logic(message, chat_id, owner_id):
         # Step 4: Add bots
         await message.edit("🤖 **Adding bots...**")
         LOGGER.info(f"[STEP 4] Starting bot installation for {chat_id}")
-        LOGGER.info(f"[STEP 4] Bots to install: {len(Config.BOTS_TO_ADD)}")
         
         try:
             successful, failed = await BotManager.process_bots(
@@ -115,19 +114,14 @@ async def setup_handler(client, message):
     target_chat = message.chat.id
     status = None
     
-    # -------------------------------------------------------
-    # 1. OWNER ID DETECTION
-    # -------------------------------------------------------
+    # OWNER ID DETECTION
     owner_id = None
     if message.from_user:
-        # Normal user or non-anonymous admin
         owner_id = message.from_user.id
         status = await message.reply_text("🔍 **Identifying owner...**")
     else:
-        # Anonymous Admin case
         status = await message.reply_text("🕵️ **Anonymous Admin detected...**\n🔍 Fetching channel owner to link account...")
         try:
-            # Iterate through admins to find the Owner
             found_owner = False
             async for member in Clients.bot.get_chat_members(target_chat, filter=ChatMembersFilter.ADMINISTRATORS):
                 if member.status == ChatMemberStatus.OWNER:
@@ -138,36 +132,28 @@ async def setup_handler(client, message):
             if not found_owner or not owner_id:
                 await status.edit("❌ **Setup Failed**\n\nCould not identify the channel owner. Please disable Anonymous Admin and try again.")
                 return
-            
             LOGGER.info(f"[SETUP] Anonymous admin resolved to Owner ID: {owner_id}")
         except Exception as e:
             LOGGER.error(f"[SETUP] Failed to fetch owner: {e}")
             await status.edit("❌ **Error identifying owner.**\nPlease disable Anonymous Admin and try again.")
             return
 
-    LOGGER.info(f"[SETUP CMD] Received in chat {target_chat} linked to owner {owner_id}")
-
-    # -------------------------------------------------------
-    # 2. VERIFY OWNER REACHABILITY (DM CHECK)
-    # -------------------------------------------------------
+    # DM Check
     try:
-        # Try to send a verification message to the owner
         await Clients.bot.send_message(
             chat_id=owner_id,
             text=(
                 f"✅ **LinkerX Setup Verification**\n\n"
                 f"Setup is initializing for channel: **{message.chat.title}**\n"
-                f"🆔 `{target_chat}`\n\n"
-                f"__You are receiving this because you are linked as the owner of this setup.__"
+                f"🆔 `{target_chat}`"
             )
         )
     except (PeerIdInvalid, UserIsBlocked, InputUserDeactivated):
-        # User has not started the bot or blocked it
         bot_username = await Clients.get_bot_username()
         await status.edit(
             f"⚠️ **Action Required**\n\n"
             f"I cannot message the Owner (ID: `{owner_id}`).\n"
-            f"To ensure you receive error alerts and status updates, you must start the bot first.\n\n"
+            f"To ensure you receive error alerts, you must start the bot first.\n\n"
             f"👇 **Please do this:**\n"
             f"1. [Click Here to Start Bot](https://t.me/{bot_username}?start=setup)\n"
             f"2. Come back here and run `/setup` again."
@@ -180,16 +166,11 @@ async def setup_handler(client, message):
 
     await status.edit("🔍 **Checking bot permissions...**")
     
-    # -------------------------------------------------------
-    # 3. PERMISSION CHECKS
-    # -------------------------------------------------------
     try:
         LOGGER.info(f"[PERMISSION CHECK] Checking bot permissions in {target_chat}")
         member = await Clients.bot.get_chat_member(target_chat, "me")
         
-        # Check if Admin or Owner
         is_admin = member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
-        # Check for Promote permission
         has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False)) if member.privileges else False
         
         LOGGER.info(f"[PERMISSION CHECK] is_admin: {is_admin}, can_promote_members: {has_promote_flag}")
@@ -197,41 +178,26 @@ async def setup_handler(client, message):
         if not is_admin:
             LOGGER.error(f"[PERMISSION CHECK] ❌ Bot is not admin in {target_chat}")
             bot_username = await Clients.get_bot_username()
-            bot_mention = f"@{bot_username}" if bot_username else "the bot"
-            await status.edit(
-                f"⚠️ **Missing permissions!**\n\n"
-                f"{bot_mention} must be an admin in this channel with **Add New Admins** permission enabled.\n\n"
-                f"Please update permissions and try again."
-            )
+            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} must be an admin.")
             return
         
         if not has_promote_flag:
             LOGGER.error(f"[PERMISSION CHECK] ❌ Bot lacks can_promote_members")
             bot_username = await Clients.get_bot_username()
-            bot_mention = f"@{bot_username}" if bot_username else "the bot"
-            await status.edit(
-                f"⚠️ **Missing 'Add New Admins' permission!**\n\n"
-                f"{bot_mention} is admin but lacks **Add New Admins** permission.\n\n"
-                f"Please enable this permission and try again."
-            )
+            await status.edit(f"⚠️ **Missing permissions!**\n\n@{bot_username} needs 'Add New Admins' rights.")
             return
         
         LOGGER.info(f"[PERMISSION CHECK] ✅ Bot permissions verified")
     
     except UserNotParticipant:
         LOGGER.error(f"[PERMISSION CHECK] ❌ Bot not in channel {target_chat}")
-        await status.edit(
-            f"⚠️ **Bot not in channel!**\n\n"
-            f"Please ensure the bot is added to the channel properly."
-        )
+        await status.edit(f"⚠️ **Bot not in channel!**")
         return
-    
     except Exception as e:
         LOGGER.error(f"[PERMISSION CHECK] ❌ Error checking permissions: {type(e).__name__} - {e}")
         await status.edit(f"❌ **Error checking permissions:**\n`{e}`")
         return
     
-    # Add to queue for processing
     LOGGER.info(f"[QUEUE] Adding {target_chat} to processing queue")
     try:
         await queue_manager.add_to_queue(status, target_chat, owner_id, setup_logic)
