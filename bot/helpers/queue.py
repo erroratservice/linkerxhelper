@@ -12,11 +12,12 @@ class QueueManager:
     def calculate_wait(self, position):
         """
         Calculate estimated wait time dynamically.
-        Base Overhead: 20s (15s perm wait + 5s join/network)
-        Per Bot: 3s (2s fixed delay + 1s buffer for retries/network)
+        Base Overhead: 30s (15s perm wait + 10s queue delay + 5s network/join)
+        Per Bot: 3s (2s fixed delay + 1s buffer for retries)
         """
         bots_count = len(Config.BOTS_TO_ADD)
-        time_per_user = 20 + (bots_count * 3)
+        # Increased base overhead to account for the new 10s sleep between tasks
+        time_per_user = 30 + (bots_count * 3)
         
         # Calculate total wait
         total_seconds = position * time_per_user
@@ -48,8 +49,7 @@ class QueueManager:
         # SAVE TO DB INSTANTLY (Crash Proof)
         await self.sync_db()
         
-        # Position is 0-indexed in list, so 1st person is pos 0 (active), 
-        # 2nd person is pos 1 (waiting 1 turn)
+        # Position is 0-indexed in list
         queue_len = len(self.waiting_users)
         wait_pos = queue_len - 1  # Number of people ahead
         
@@ -123,7 +123,10 @@ class QueueManager:
                     pass
             
             self.queue.task_done()
-            await asyncio.sleep(2)
+            
+            # INCREASED DELAY: Sleep 10s between different channels
+            LOGGER.info("⏳ Cooling down for 10s before next task...")
+            await asyncio.sleep(10)
 
 # Global queue manager instance
 queue_manager = QueueManager()
