@@ -18,7 +18,7 @@ class Config:
     
     # Safety & Limits
     SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10))
-    SYNC_ACTION_DELAY = 2
+    SYNC_ACTION_DELAY = 4
     MAX_USER_CHANNELS = int(os.environ.get("MAX_USER_CHANNELS", 100))
     
     # Web Server
