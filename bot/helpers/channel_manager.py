@@ -31,16 +31,11 @@ class ChannelManager:
         """Add helper to channel using invite link (Bots cannot add users directly)"""
         LOGGER.info(f"[ADD_HELPER] Starting for channel {chat_id}")
         
-        # Get helper's user ID/Username
+        # Get helper's user ID
         helper_me = await Clients.user_app.get_me()
         helper_id = helper_me.id
         
-        # 1. Capacity Check
-        active_count = 0 
-        # (Importing Database here to avoid circular imports if possible, or assume checked before)
-        # For safety, we just log capacity here or rely on the setup module to have checked it.
-        
-        # 2. Add via Invite Link (The only reliable method for Bots -> Userbots in Channels)
+        # 1. Add via Invite Link (The only reliable method for Bots -> Userbots in Channels)
         try:
             LOGGER.info(f"[ADD_HELPER] Creating invite link...")
             invite_link = await Clients.bot.export_chat_invite_link(chat_id)
@@ -54,7 +49,7 @@ class ChannelManager:
             LOGGER.error(f"[ADD_HELPER] ❌ Failed to join via link: {e}")
             raise e
 
-        # 3. Promote Helper
+        # 2. Promote Helper
         LOGGER.info(f"[PROMOTE_HELPER] Getting bot's privileges to match")
         try:
             # Get the BOT'S privileges to mirror them to the Helper
