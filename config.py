@@ -17,7 +17,7 @@ class Config:
     BOTS_TO_ADD = [b.strip() for b in os.environ.get("BOTS_TO_ADD", "").split(",") if b.strip()]
     
     # Safety & Limits
-    SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10))
+    SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 15))
     SYNC_ACTION_DELAY = 4
     MAX_USER_CHANNELS = int(os.environ.get("MAX_USER_CHANNELS", 100))
     
