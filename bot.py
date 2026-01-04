@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime
 from aiohttp import web, ClientSession
-from motor.motor_asyncio import AsyncIOMotorClient  # Motor async driver [web:56][web:63]
+from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters, idle
 from pyrogram.types import ChatPrivileges
 from pyrogram.errors import (
@@ -25,8 +25,8 @@ OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 BOTS_TO_ADD = [b.strip() for b in os.environ.get("BOTS_TO_ADD", "").split(",") if b.strip()]
 
 # Safety delays
-SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10))  # seconds between channels in sync
-SYNC_ACTION_DELAY = 2                                              # seconds between per-bot actions
+SYNC_CHANNEL_DELAY = int(os.environ.get("SYNC_CHANNEL_DELAY", 10))
+SYNC_ACTION_DELAY = 2
 
 # Helper user max channels (below TG limit 500)
 MAX_USER_CHANNELS = int(os.environ.get("MAX_USER_CHANNELS", 100))
@@ -84,7 +84,7 @@ validate_env()
 logger.info(f"🛡️ Safety delays: {SYNC_ACTION_DELAY}s between bots, {SYNC_CHANNEL_DELAY}s between channels")
 logger.info(f"📊 Max helper user channels: {MAX_USER_CHANNELS}")
 
-# --- DATABASE (Motor) [web:46][web:51] ---
+# --- DATABASE (Motor) ---
 
 mongo_client = AsyncIOMotorClient(MONGO_URL)
 db = mongo_client["linkerx_db"]
@@ -341,7 +341,6 @@ async def process_channel_bots(chat_id, action, bots_list, status_msg=None):
 
         try:
             if action == "add":
-                # Add bot as member first (ignore if already there)
                 try:
                     await user_app.add_chat_members(chat_id, username)
                     await asyncio.sleep(0.5)
@@ -480,7 +479,7 @@ async def setup_handler(client, message):
 
     status = await message.reply_text("🔍 **Checking bot permissions...**")
 
-    # Relaxed but correct permission check for bot [web:71][web:17]
+    # Check bot permissions
     try:
         member = await bot.get_chat_member(target_chat, "me")
         logger.info(f"Bot member in {target_chat}: status={member.status}, privileges={member.privileges}")
@@ -488,7 +487,7 @@ async def setup_handler(client, message):
         is_admin = member.status in ("administrator", "creator")
         has_promote_flag = bool(getattr(member.privileges, "can_promote_members", False))
 
-        can_promote = is_admin  # relaxed: any admin is allowed; real rights checked on API call
+        can_promote = is_admin
 
         if is_admin and not has_promote_flag:
             logger.warning(
@@ -736,8 +735,9 @@ async def main():
         asyncio.create_task(queue_manager.worker())
         asyncio.create_task(ping())
 
-        logger.info("LinkerX service ready")
+        logger.info("🚀 LinkerX service ready")
         await idle()
+        
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
@@ -753,11 +753,23 @@ async def main():
         except:
             pass
         try:
-            mongo_client.close()
+            mongo_client.close()  # Motor's close() is synchronous
         except:
             pass
         logger.info("Shutdown complete")
 
 
+# --- EVENT LOOP FIX ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Program terminated by user")
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except:
+            pass
+        loop.close()
