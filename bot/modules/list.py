@@ -13,7 +13,8 @@ async def list_handler(client, message):
             await message.reply_text(
                 "📭 **No Channels Found**\n\n"
                 "You haven't set up LinkerX in any channels yet.\n\n"
-                "Use `/setup <channel_id>` to get started!"
+                "**To get started:**\n"
+                "Add me to your channel and run `/setup` inside it!"
             )
             return
         
