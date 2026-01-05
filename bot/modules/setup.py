@@ -228,7 +228,7 @@ async def setup_handler(client, message):
             await status.edit(
                 f"✅ **All bots already installed!**\n\n"
                 f"I checked the admin list and all {len(Config.BOTS_TO_ADD)} bots are present.\n"
-                f"No further action needed."
+                f"Start Sending Files In The Channel To Get Fast Download Links."
             )
             # We can update DB here to be safe
             await Database.save_setup(target_chat, owner_id, Config.BOTS_TO_ADD)
