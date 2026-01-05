@@ -86,7 +86,6 @@ async def setup_logic(message, chat_id, owner_id):
             f"📢 Channel: `{chat_id}`\n"
             f"👑 Owner Linked: `{owner_id}`\n"
             f"🤖 Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n"
-            f"🤖 Now Start Sending Files In This Channel To Get Links."
         )
         if failed:
             text += f"\n⚠️ Failed: {', '.join(failed)}"
@@ -104,6 +103,15 @@ async def setup_handler(client, message):
     """Setup command handler"""
     target_chat = message.chat.id
     status = None
+    
+    # 0. GROUP CHECK (New Restriction)
+    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+        await message.reply_text(
+            "⚠️ **Groups Not Supported**\n\n"
+            "I am designed to setup **Channels** only.\n"
+            "Please add me to a Channel and run `/setup` there."
+        )
+        return
     
     # 1. QUEUE CHECK
     try:
@@ -228,7 +236,7 @@ async def setup_handler(client, message):
             await status.edit(
                 f"✅ **All bots already installed!**\n\n"
                 f"I checked the admin list and all {len(Config.BOTS_TO_ADD)} bots are present.\n"
-                f"Start Sending Files In The Channel To Get Fast Download Links."
+                f"No further action needed."
             )
             # We can update DB here to be safe
             await Database.save_setup(target_chat, owner_id, Config.BOTS_TO_ADD)
