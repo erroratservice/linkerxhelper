@@ -86,6 +86,7 @@ async def setup_logic(message, chat_id, owner_id):
             f"📢 Channel: `{chat_id}`\n"
             f"👑 Owner Linked: `{owner_id}`\n"
             f"🤖 Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n"
+            f"🤖 Now Start Sending Files In This Channel To Get Resumable And Fast Download Links."
         )
         if failed:
             text += f"\n⚠️ Failed: {', '.join(failed)}"
@@ -235,8 +236,8 @@ async def setup_handler(client, message):
         if not missing_bots:
             await status.edit(
                 f"✅ **All bots already installed!**\n\n"
-                f"I checked the admin list and all {len(Config.BOTS_TO_ADD)} bots are present.\n"
-                f"No further action needed."
+                f"✅ I checked the admin list and all {len(Config.BOTS_TO_ADD)} bots are present.\n"
+                f"🤖 Now Start Sending Files In This Channel To Get Resumable And Fast Download Links."
             )
             # We can update DB here to be safe
             await Database.save_setup(target_chat, owner_id, Config.BOTS_TO_ADD)
