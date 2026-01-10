@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Config:
     # Telegram API
@@ -28,6 +31,11 @@ class Config:
     # GitHub Update Configuration
     GITHUB_REPO = os.environ.get("GITHUB_REPO", "")  # e.g., "https://github.com/username/linkerx"
     GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+    
+    # --- NEW: Permission Guide Image ---
+    # File ID or URL of the image showing all permissions enabled.
+    # Replace the default URL with the File ID of the screenshot you uploaded to Telegram.
+    PERM_GUIDE_PIC = os.environ.get("PERM_GUIDE_PIC", "https://telegra.ph/file/YOUR_IMAGE_URL_HERE.jpg")
     
     @staticmethod
     def validate_bot_usernames(bots):
