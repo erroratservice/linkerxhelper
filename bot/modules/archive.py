@@ -26,7 +26,7 @@ async def archive_logic(message, chat_id, owner_id):
     1. Adds helper
     2. Adds bots
     3. Saves to ARCHIVE DB
-    4. BOT KICKS HELPER (Attempts to kick, logs if permission missing)
+    4. BOT KICKS HELPER (Important: Helper does not leave, Bot kicks it)
     """
     LOGGER.info(f"=[ARCHIVE] SETUP STARTED for channel {chat_id}=")
     
@@ -66,22 +66,20 @@ async def archive_logic(message, chat_id, owner_id):
             
         await message.edit(text)
         
-        # 5. KICK HELPER
-        # Note: Since 'can_restrict_members' is False in channel logs, this might fail.
-        # We try anyway, but we don't crash the setup if it fails.
-        LOGGER.info(f"[ARCHIVE] 👢 Bot attempting to kick Helper from {chat_id}")
+        # 5. KICK HELPER (Bot Bans then Unbans Helper)
+        LOGGER.info(f"[ARCHIVE] 👢 Bot kicking Helper from {chat_id}")
         try:
             helper_me = await Clients.user_app.get_me()
             helper_id = helper_me.id
             
+            # Kick (Ban then Unban)
             await Clients.bot.ban_chat_member(chat_id, helper_id)
             await asyncio.sleep(1)
             await Clients.bot.unban_chat_member(chat_id, helper_id)
             
             LOGGER.info(f"[ARCHIVE] ✅ Helper successfully kicked")
         except Exception as e:
-            # This is expected if 'can_restrict_members' is effectively false
-            LOGGER.warning(f"[ARCHIVE] ⚠️ Could not auto-kick helper (Permission Issue): {e}")
+            LOGGER.error(f"[ARCHIVE] ❌ Failed to kick helper: {e}")
 
         LOGGER.info(f"=[ARCHIVE] Finished for {chat_id}=")
 
@@ -100,30 +98,49 @@ async def help_archive_handler(client, message):
     """Handler for strict archive setup"""
     
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-         return await message.reply_text("⚠️ This command is for **Channels** only.")
+         # If we can't reply to a group, we just ignore it (avoids spam logs)
+         try: await message.reply_text("⚠️ This command is for **Channels** only.")
+         except: pass
+         return
 
     chat_id = message.chat.id
 
     # 0. CONFLICT CHECK
     is_main_setup = await Database.is_channel_in_main_db(chat_id)
     if is_main_setup:
-        return await message.reply_text(
-            "🛑 **Action Blocked**\n\n"
-            "This channel is already configured with the LinkerX Services\n"
-            "You cannot use Archive mode here as it conflicts with the existing setup."
-            "Please create a new channel and add the bot there and run the /helparchive commnand there"
-        )
-    
-    if queue_manager.get_position(chat_id):
-        return await message.reply_text("⚠️ This channel is already in queue.")
+        try:
+            return await message.reply_text(
+                "🛑 **Action Blocked**\n\n"
+                "This channel is already configured with the LinkerX Services\n"
+                "You cannot use Archive mode here as it conflicts with the existing setup."
+                "Please create a new channel and add the bot there and run the /helparchive commnand there"
+            )
+        except (ChatAdminRequired, ChatWriteForbidden):
+            return
 
-    status = await message.reply_text("🔍 **Checking strict permissions...**")
+    if queue_manager.get_position(chat_id):
+        try: await message.reply_text("⚠️ This channel is already in queue.")
+        except: pass
+        return
+
+    # --- FIX STARTS HERE ---
+    # We wrap the initial reply in try/except to catch "ChatAdminRequired" crash
+    status = None
+    try:
+        status = await message.reply_text("🔍 **Checking strict permissions...**")
+    except (ChatAdminRequired, ChatWriteForbidden):
+        # Bot is not admin or can't speak. We can't tell the user, so we just log and stop.
+        LOGGER.warning(f"[ARCHIVE] ❌ Bot lacks Admin/Write rights in {chat_id} - Ignoring command.")
+        return
+    except Exception as e:
+        LOGGER.error(f"[ARCHIVE] Initial reply failed: {e}")
+        return
+    # --- FIX ENDS HERE ---
     
     try:
         member = await client.get_chat_member(chat_id, "me")
         privs = member.privileges
 
-        # UPDATED: Removed 'can_restrict_members' as it returns False in logs
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -151,7 +168,8 @@ async def help_archive_handler(client, message):
             caption = (
                 "🛑 **INSUFFICIENT PERMISSIONS FOR ARCHIVE**\n\n"
                 "For `/helparchive`, the bot requires **EVERY** permission enabled.\n\n"
-                "\n\n **Please enable ALL permissions as shown in the above pic and resend `/helparchive` command.**"
+                "❌ **Missing:**\n" + "\n".join([f"- {m}" for m in missing]) +
+                "\n\n👇 **Please enable ALL permissions as shown below:**"
             )
             
             try:
@@ -201,7 +219,7 @@ async def help_archive_handler(client, message):
         try: await status.edit(f"❌ Error: {e}")
         except: pass
 
-# ... (rest of the file remains identical: sync_archive_handler, stats_archive_handler) ...
+# ... (sync_archive and stats_archive handlers remain same) ...
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
     # (Same code as previous valid version)
