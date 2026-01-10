@@ -7,25 +7,41 @@ class Database:
     client = None
     db = None
     channels = None
+    archive_channels = None  # <--- NEW COLLECTION VARIABLE
     
     @staticmethod
     async def initialize():
         """Initialize MongoDB connection"""
         Database.client = AsyncIOMotorClient(Config.MONGO_URL)
         Database.db = Database.client["linkerx_db"]
-        Database.channels = Database.db["channels"]
         
-        # Create indexes
+        # 1. Main Collection
+        Database.channels = Database.db["channels"]
+        # 2. Archive Collection (New)
+        Database.archive_channels = Database.db["archive_channels"]
+        
+        # Indexes for Main
         try:
             await Database.channels.create_index("channel_id", unique=True)
             await Database.channels.create_index("owner_id")
             await Database.channels.create_index("user_joined_at")
             await Database.channels.create_index("user_is_member")
-            LOGGER.info("✅ Database indexes created")
+            LOGGER.info("✅ Main Database indexes created")
         except Exception as e:
             LOGGER.error(f"❌ Database initialization error: {e}")
             raise
-    
+
+        # Indexes for Archive
+        try:
+            await Database.archive_channels.create_index("channel_id", unique=True)
+            await Database.archive_channels.create_index("owner_id")
+            LOGGER.info("✅ Archive Database indexes created")
+        except Exception as e:
+            LOGGER.error(f"❌ Archive Database index error: {e}")
+
+    # =================================================================
+    #  MAIN DATABASE METHODS (Existing - For /setup)
+    # =================================================================
     @staticmethod
     async def get_active_channel_count():
         try:
@@ -139,9 +155,66 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Error getting stats: {e}")
             return None
+
+    # =================================================================
+    #  ARCHIVE DATABASE METHODS (NEW - For /helparchive)
+    # =================================================================
+
+    @staticmethod
+    async def save_archive_setup(chat_id, owner_id, installed_bots):
+        """Save setup results to the SEPARATE archive collection"""
+        await Database.archive_channels.update_one(
+            {"channel_id": chat_id},
+            {
+                "$set": {
+                    "channel_id": chat_id,
+                    "owner_id": owner_id,
+                    "installed_bots": installed_bots,
+                    "last_updated": datetime.utcnow(),
+                    "helper_finished": True, 
+                },
+                "$setOnInsert": {
+                    "setup_date": datetime.utcnow(),
+                },
+            },
+            upsert=True,
+        )
+
+    @staticmethod
+    async def get_archive_stats():
+        """Get statistics specifically for the ARCHIVE DB"""
+        try:
+            total_channels = await Database.archive_channels.count_documents({})
+            unique_owners = len(await Database.archive_channels.distinct("owner_id"))
             
-    # --- QUEUE & RESTART STATE ---
-    
+            pipeline = [
+                {"$project": {"bot_count": {"$size": {"$ifNull": ["$installed_bots", []]}}}},
+                {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
+            ]
+            result = await Database.archive_channels.aggregate(pipeline).to_list(length=1)
+            total_bots = result[0]["total_bots"] if result else 0
+            
+            return {
+                "total_channels": total_channels,
+                "unique_owners": unique_owners,
+                "total_bots": total_bots,
+            }
+        except Exception as e:
+            LOGGER.error(f"Error getting archive stats: {e}")
+            return None
+
+    @staticmethod
+    async def get_all_archive_channels():
+        """Get all channels from ARCHIVE DB for syncing"""
+        try:
+            return await Database.archive_channels.find({}).to_list(length=None)
+        except Exception as e:
+            LOGGER.error(f"Error getting all archive channels: {e}")
+            return []
+
+    # =================================================================
+    #  SYSTEM STATE
+    # =================================================================
     @staticmethod
     async def update_queue_state(queue_data):
         """Save the current queue list to DB (Crash Proofing)"""
