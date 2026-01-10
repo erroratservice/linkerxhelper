@@ -58,7 +58,7 @@ async def archive_logic(message, chat_id, owner_id):
             f"📢 Channel: `{chat_id}`\n"
             f"🤖 Bots Added: {len(successful)}/{len(Config.BOTS_TO_ADD)}\n\n"
             f"🙏 **Thank you for your help!**\n"
-            f"The helper account will now be removed from the channel."
+            f"Please leave the channel for the convenience and safety of your account."
         )
         if failed:
             text += f"\n⚠️ Failed: {', '.join(failed)}"
@@ -109,8 +109,9 @@ async def help_archive_handler(client, message):
     if is_main_setup:
         return await message.reply_text(
             "🛑 **Action Blocked**\n\n"
-            "This channel is already configured with the standard `/setup`.\n"
+            "This channel is already configured with the LinkerX Services\n"
             "You cannot use Archive mode here as it conflicts with the existing setup."
+            "Please create a new channel and add the bot there and run the /helparchive commnand there"
         )
     
     # 1. Queue Check
