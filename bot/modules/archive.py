@@ -168,8 +168,7 @@ async def help_archive_handler(client, message):
             caption = (
                 "🛑 **INSUFFICIENT PERMISSIONS FOR ARCHIVE**\n\n"
                 "For `/helparchive`, the bot requires **EVERY** permission enabled.\n\n"
-                "❌ **Missing:**\n" + "\n".join([f"- {m}" for m in missing]) +
-                "\n\n👇 **Please enable ALL permissions as shown below:**"
+                "\n\n **Please enable ALL permissions as shown in the picture:**"
             )
             
             try:
