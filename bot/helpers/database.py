@@ -7,7 +7,7 @@ class Database:
     client = None
     db = None
     channels = None
-    archive_channels = None  # <--- NEW COLLECTION VARIABLE
+    archive_channels = None
     
     @staticmethod
     async def initialize():
@@ -17,7 +17,7 @@ class Database:
         
         # 1. Main Collection
         Database.channels = Database.db["channels"]
-        # 2. Archive Collection (New)
+        # 2. Archive Collection
         Database.archive_channels = Database.db["archive_channels"]
         
         # Indexes for Main
@@ -40,8 +40,21 @@ class Database:
             LOGGER.error(f"❌ Archive Database index error: {e}")
 
     # =================================================================
-    #  MAIN DATABASE METHODS (Existing - For /setup)
+    #  MAIN DATABASE METHODS
     # =================================================================
+    
+    @staticmethod
+    async def is_channel_in_main_db(chat_id):
+        """Check if channel exists in main Setup DB (Prevention Check)"""
+        try:
+            # We look for ANY entry, even if user_is_member=False, to be safe.
+            # But strictly speaking, we care about active setups. 
+            # Let's check simply for existence of the ID document.
+            doc = await Database.channels.find_one({"channel_id": chat_id})
+            return doc is not None
+        except Exception:
+            return False
+
     @staticmethod
     async def get_active_channel_count():
         try:
@@ -123,12 +136,10 @@ class Database:
     
     @staticmethod
     async def get_total_stats():
-        """Get global statistics with crash prevention"""
         try:
             total_channels = await Database.channels.count_documents({})
             unique_owners = len(await Database.channels.distinct("owner_id"))
             
-            # Use $ifNull to prevent crashes on incomplete setups
             pipeline = [
                 {"$project": {"bot_count": {"$size": {"$ifNull": ["$installed_bots", []]}}}},
                 {"$group": {"_id": None, "total_bots": {"$sum": "$bot_count"}}}
@@ -136,7 +147,6 @@ class Database:
             result = await Database.channels.aggregate(pipeline).to_list(length=1)
             total_bots = result[0]["total_bots"] if result else 0
             
-            # Oldest membership
             cursor = Database.channels.find({"user_is_member": True}).sort("user_joined_at", 1).limit(1)
             oldest_list = await cursor.to_list(length=1)
             oldest_info = "N/A"
@@ -157,7 +167,7 @@ class Database:
             return None
 
     # =================================================================
-    #  ARCHIVE DATABASE METHODS (NEW - For /helparchive)
+    #  ARCHIVE DATABASE METHODS
     # =================================================================
 
     @staticmethod
@@ -182,7 +192,6 @@ class Database:
 
     @staticmethod
     async def get_archive_stats():
-        """Get statistics specifically for the ARCHIVE DB"""
         try:
             total_channels = await Database.archive_channels.count_documents({})
             unique_owners = len(await Database.archive_channels.distinct("owner_id"))
@@ -205,7 +214,6 @@ class Database:
 
     @staticmethod
     async def get_all_archive_channels():
-        """Get all channels from ARCHIVE DB for syncing"""
         try:
             return await Database.archive_channels.find({}).to_list(length=None)
         except Exception as e:
@@ -217,7 +225,6 @@ class Database:
     # =================================================================
     @staticmethod
     async def update_queue_state(queue_data):
-        """Save the current queue list to DB (Crash Proofing)"""
         try:
             await Database.db["system_state"].update_one(
                 {"_id": "queue_state"},
@@ -229,7 +236,6 @@ class Database:
 
     @staticmethod
     async def get_queue_state():
-        """Get the queue list saved before a crash"""
         try:
             doc = await Database.db["system_state"].find_one({"_id": "queue_state"})
             return doc.get("users", []) if doc else []
@@ -239,7 +245,6 @@ class Database:
 
     @staticmethod
     async def clear_queue_state():
-        """Clear queue state after notifying users"""
         try:
             await Database.db["system_state"].delete_one({"_id": "queue_state"})
         except Exception as e:
@@ -247,7 +252,6 @@ class Database:
 
     @staticmethod
     async def save_restart_info(chat_id, message_id, status, error=None, queue_data=None):
-        """Save restart info including pending queue data"""
         try:
             restart_collection = Database.db["restart_info"]
             await restart_collection.delete_many({})
@@ -256,7 +260,7 @@ class Database:
                 "message_id": message_id,
                 "status": status,
                 "error": error,
-                "queue_data": queue_data or [],  # This handles the passed list
+                "queue_data": queue_data or [],
                 "timestamp": datetime.utcnow()
             })
             LOGGER.info(f"✅ Restart info saved: status={status}, chat={chat_id}, msg={message_id}")
