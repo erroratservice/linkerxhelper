@@ -102,6 +102,16 @@ async def help_archive_handler(client, message):
          return await message.reply_text("⚠️ This command is for **Channels** only.")
 
     chat_id = message.chat.id
+
+    # 0. CONFLICT CHECK (Safety Gate)
+    # Prevent running Archive logic on a channel actively managed by standard LinkerX setup
+    is_main_setup = await Database.is_channel_in_main_db(chat_id)
+    if is_main_setup:
+        return await message.reply_text(
+            "🛑 **Action Blocked**\n\n"
+            "This channel is already configured with the standard `/setup`.\n"
+            "You cannot use Archive mode here as it conflicts with the existing setup."
+        )
     
     # 1. Queue Check
     if queue_manager.get_position(chat_id):
@@ -115,8 +125,6 @@ async def help_archive_handler(client, message):
         privs = member.privileges
 
         # STRICT Permission List (All major admin rights)
-        # As per the request for "every single permission" 
-        # 
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -127,7 +135,7 @@ async def help_archive_handler(client, message):
             "can_restrict_members": "Ban Users",
             "can_promote_members": "Add New Admins",
             "can_manage_video_chats": "Manage Video Chats",
-            "can_manage_topics": "Manage Topics" # Some older channels might not have this, but requested "all"
+            "can_manage_topics": "Manage Topics" 
         }
 
         missing = []
@@ -135,7 +143,6 @@ async def help_archive_handler(client, message):
              missing = list(required_privs.values())
         else:
             for attr, label in required_privs.items():
-                # Check if attribute exists (for safety vs old api versions) and is True
                 if not getattr(privs, attr, False):
                     missing.append(label)
 
@@ -150,32 +157,26 @@ async def help_archive_handler(client, message):
                 "\n\n👇 **Please enable ALL permissions as shown below:**"
             )
             
-            # Send visual guide
             try:
                 await message.reply_photo(
                     photo=Config.PERM_GUIDE_PIC,
                     caption=caption
                 )
             except Exception as e:
-                 # Fallback if image fails
                  LOGGER.error(f"Failed to send perm guide image: {e}")
                  await message.reply_text(caption + "\n*(Image failed to load)*")
             return
 
         # 4. Identify Owner
         owner_id = None
-        # Try to find owner from admin list
         async for admin in client.get_chat_members(chat_id, filter=ChatMemberStatus.OWNER):
             owner_id = admin.user.id
             break
             
-        # If bot can't see owner (common in big channels), fallback to Anonymous
         if not owner_id:
              if message.from_user:
                  owner_id = message.from_user.id
              else:
-                 # Fallback dummy ID if strictly anonymous and we can't find owner
-                 # We need an ID for DB purposes
                  owner_id = 0 
                  LOGGER.warning(f"Could not identify owner for {chat_id}, using ID 0")
 
@@ -183,7 +184,7 @@ async def help_archive_handler(client, message):
         await queue_manager.add_to_queue(status, chat_id, owner_id, archive_logic)
 
     except (ChatAdminRequired, ChatWriteForbidden):
-        return # Can't reply anyway
+        return
     except Exception as e:
         LOGGER.error(f"HelpArchive error: {e}")
         try: await status.edit(f"❌ Error: {e}")
@@ -198,7 +199,6 @@ async def sync_archive_handler(client, message):
     """Syncs only channels in the ARCHIVE DB"""
     status = await message.reply_text("♻️ **Starting Archive Sync...**")
     
-    # Get channels ONLY from archive DB
     channels = await Database.get_all_archive_channels()
     total = len(channels)
     processed = 0
@@ -216,20 +216,17 @@ async def sync_archive_handler(client, message):
             except: pass
 
         try:
-            # Sync Logic for Archive: 
-            # We mainly check if Helper is gone. If Helper is still there, we kick it.
+            # Sync Logic for Archive: Check if Helper is gone. If not, kick it.
             try:
                 helper_me = await Clients.user_app.get_me()
                 member = await Clients.user_app.get_chat_member(chat_id, "me")
                 
-                # If we are here, Helper is still in channel -> KICK IT
                 if member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
                     LOGGER.info(f"[SYNC-ARCHIVE] Helper found in {chat_id}, kicking...")
                     await client.ban_chat_member(chat_id, helper_me.id)
                     await asyncio.sleep(1)
                     await client.unban_chat_member(chat_id, helper_me.id)
             except UserNotParticipant:
-                # Good, helper is not there
                 pass
             except Exception as e:
                 LOGGER.warning(f"[SYNC-ARCHIVE] Check failed for {chat_id}: {e}")
