@@ -5,3 +5,4 @@ from . import list
 from . import sync
 from . import stats
 from . import restart
+from . import archive
