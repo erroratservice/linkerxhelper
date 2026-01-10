@@ -26,7 +26,7 @@ async def archive_logic(message, chat_id, owner_id):
     1. Adds helper
     2. Adds bots
     3. Saves to ARCHIVE DB
-    4. BOT KICKS HELPER (Important: Helper does not leave, Bot kicks it)
+    4. BOT KICKS HELPER (Attempts to kick, logs if permission missing)
     """
     LOGGER.info(f"=[ARCHIVE] SETUP STARTED for channel {chat_id}=")
     
@@ -66,20 +66,22 @@ async def archive_logic(message, chat_id, owner_id):
             
         await message.edit(text)
         
-        # 5. KICK HELPER (Bot Bans then Unbans Helper)
-        LOGGER.info(f"[ARCHIVE] 👢 Bot kicking Helper from {chat_id}")
+        # 5. KICK HELPER
+        # Note: Since 'can_restrict_members' is False in channel logs, this might fail.
+        # We try anyway, but we don't crash the setup if it fails.
+        LOGGER.info(f"[ARCHIVE] 👢 Bot attempting to kick Helper from {chat_id}")
         try:
             helper_me = await Clients.user_app.get_me()
             helper_id = helper_me.id
             
-            # Kick (Ban then Unban) to ensure they can be added back later if needed
             await Clients.bot.ban_chat_member(chat_id, helper_id)
             await asyncio.sleep(1)
             await Clients.bot.unban_chat_member(chat_id, helper_id)
             
             LOGGER.info(f"[ARCHIVE] ✅ Helper successfully kicked")
         except Exception as e:
-            LOGGER.error(f"[ARCHIVE] ❌ Failed to kick helper: {e}")
+            # This is expected if 'can_restrict_members' is effectively false
+            LOGGER.warning(f"[ARCHIVE] ⚠️ Could not auto-kick helper (Permission Issue): {e}")
 
         LOGGER.info(f"=[ARCHIVE] Finished for {chat_id}=")
 
@@ -121,6 +123,7 @@ async def help_archive_handler(client, message):
         member = await client.get_chat_member(chat_id, "me")
         privs = member.privileges
 
+        # UPDATED: Removed 'can_restrict_members' as it returns False in logs
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -128,7 +131,6 @@ async def help_archive_handler(client, message):
             "can_edit_messages": "Edit Messages",
             "can_delete_messages": "Delete Messages",
             "can_invite_users": "Invite Users via Link",
-            "can_restrict_members": "Ban Users",
             "can_promote_members": "Add New Admins",
             "can_manage_video_chats": "Manage Video Chats",
             "can_manage_topics": "Manage Topics" 
@@ -182,7 +184,7 @@ async def help_archive_handler(client, message):
                  await message.reply_text(caption + "\n\n*(Visual guide unavailable)*")
             return
 
-        # 4. Identify Owner (Attempt only, use dummy if failed)
+        # 4. Identify Owner
         owner_id = 0
         try:
             async for admin in client.get_chat_members(chat_id, filter=ChatMemberStatus.OWNER):
@@ -200,82 +202,48 @@ async def help_archive_handler(client, message):
         try: await status.edit(f"❌ Error: {e}")
         except: pass
 
-# ==================================================================
-# SYNC ARCHIVE COMMAND (UPDATED)
-# ==================================================================
-
+# ... (rest of the file remains identical: sync_archive_handler, stats_archive_handler) ...
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
-    """
-    Syncs channels in the ARCHIVE DB.
-    - SILENT: Does not notify owner on failure.
-    - NO OWNER CHECK: Ignores owner existence.
-    - KICKS HELPER: Ensures helper is gone.
-    """
+    # (Same code as previous valid version)
     status = await message.reply_text("♻️ **Starting Archive Sync...**")
-    
     channels = await Database.get_all_archive_channels()
     total = len(channels)
     processed = 0
     failed_channels = []
-
     LOGGER.info(f"[SYNC-ARCHIVE] Started for {total} channels")
-
     for channel_data in channels:
         chat_id = channel_data.get("channel_id")
         processed += 1
-        
         if processed % 5 == 0:
             try: await status.edit(f"♻️ **Archive Syncing...**\nDo not restart bot.\nProgress: {processed}/{total}")
             except: pass
-
         try:
-            # 1. Update "last_updated" in DB (Silent heartbeat)
             await Database.archive_channels.update_one(
                 {"channel_id": chat_id},
                 {"$set": {"last_updated": datetime.utcnow()}}
             )
-
-            # 2. Check & Kick Helper (Silent Maintenance)
             try:
                 helper_me = await Clients.user_app.get_me()
                 member = await Clients.user_app.get_chat_member(chat_id, "me")
-                
-                # If Helper is present -> Kick (Ban+Unban)
                 if member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
                     LOGGER.info(f"[SYNC-ARCHIVE] Helper found in {chat_id}, kicking...")
                     await client.ban_chat_member(chat_id, helper_me.id)
                     await asyncio.sleep(1)
                     await client.unban_chat_member(chat_id, helper_me.id)
-            except UserNotParticipant:
-                pass # Helper is already gone, good.
-            except Exception as e:
-                # Log but DO NOT message owner
-                LOGGER.warning(f"[SYNC-ARCHIVE] Helper check warning for {chat_id}: {e}")
-
+            except UserNotParticipant: pass
+            except Exception as e: LOGGER.warning(f"[SYNC-ARCHIVE] Check failed for {chat_id}: {e}")
         except Exception as e:
-            # Log but DO NOT message owner
             LOGGER.error(f"[SYNC-ARCHIVE] Failed {chat_id}: {e}")
             failed_channels.append(chat_id)
-        
         await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
-
-    result_text = (
-        f"✅ **Archive Sync Complete**\n\n"
-        f"📚 Total Scanned: `{total}`\n"
-    )
-    if failed_channels:
-        result_text += f"\n⚠️ Errors: {len(failed_channels)} (Check Logs)"
-
+    result_text = (f"✅ **Archive Sync Complete**\n\n📚 Total Scanned: `{total}`\n")
+    if failed_channels: result_text += f"\n⚠️ Errors: {len(failed_channels)} (Check Logs)"
     await status.edit(result_text)
-
-# ==================================================================
-# STATS ARCHIVE COMMAND
-# ==================================================================
 
 @Clients.bot.on_message(filters.command("statsarchive") & filters.user(Config.OWNER_ID))
 async def stats_archive_handler(client, message):
-    """Shows stats only for Archive DB"""
+    # (Same code as previous valid version)
     status = await message.reply_text("📊 Fetching archive stats...")
     stats = await Database.get_archive_stats()
     if not stats: return await status.edit("❌ Failed to fetch archive stats.")
