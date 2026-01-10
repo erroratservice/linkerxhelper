@@ -112,8 +112,8 @@ async def help_archive_handler(client, message):
             return await message.reply_text(
                 "🛑 **Action Blocked**\n\n"
                 "This channel is already configured with the LinkerX Services\n"
-                "You cannot use Archive mode here as it conflicts with the existing setup."
-                "Please create a new channel and add the bot there and run the /helparchive commnand there"
+                "You cannot use this to help us as it conflicts with the existing setup."
+                "Please create a new channel and add the bot there as admin and run the /helparchive commnand there"
             )
         except (ChatAdminRequired, ChatWriteForbidden):
             return
