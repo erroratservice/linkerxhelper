@@ -30,7 +30,9 @@ class ChannelManager:
     async def add_helper_to_channel(chat_id, status_message=None):
         """
         Add helper to channel.
-        INCLUDES DEBUG LOGGING FOR STATS.
+        - Uses USER APP for Stats (Required by API).
+        - Uses BOT APP for Admin tasks (Save Limits).
+        - Max 3 Retries.
         """
         
         # =================================================================
@@ -43,6 +45,7 @@ class ChannelManager:
         while retry_count < max_retries:
             current_count = await Database.get_active_channel_count()
             
+            # If under limit, we are good to go
             if current_count < Config.MAX_USER_CHANNELS:
                 break
             
@@ -57,54 +60,38 @@ class ChannelManager:
 
                 old_id = oldest_channel.get("channel_id")
                 
-                # --- DEBUGGING STATS GATHERING ---
+                # --- HYBRID DATA GATHERING ---
                 video_count = "N/A"
                 doc_count = "N/A"
                 chat_title = "Unknown/Deleted"
                 invite_back = "Unavailable"
 
-                # Check if BOT is actually in the channel
-                bot_is_member = False
+                # 1. FETCH STATS (Must use USER APP due to API Limits)
+                # This is lightweight metadata fetching, safe for Userbot.
                 try:
-                    await Clients.bot.get_chat_member(old_id, "me")
-                    bot_is_member = True
-                except Exception as e:
-                    LOGGER.warning(f"[DEBUG] Bot is NOT in old channel {old_id}: {e}")
+                    video_count = await Clients.user_app.search_messages_count(
+                        chat_id=old_id, 
+                        filter=enums.MessagesFilter.VIDEO
+                    )
+                except Exception: 
+                    pass
 
-                # 1. Fetch Basic Info
+                try:
+                    doc_count = await Clients.user_app.search_messages_count(
+                        chat_id=old_id, 
+                        filter=enums.MessagesFilter.DOCUMENT
+                    )
+                except Exception: 
+                    pass
+
+                # 2. FETCH ADMIN INFO (Use BOT APP to save Userbot limits)
+                # The Bot is an admin, so it can generate links and see titles.
                 try:
                     chat_info = await Clients.bot.get_chat(old_id)
                     chat_title = chat_info.title
+                    invite_back = await Clients.bot.export_chat_invite_link(old_id)
                 except Exception as e:
-                    LOGGER.warning(f"[DEBUG] Failed to get Chat Title for {old_id}: {e}")
-
-                # Only try fetching stats/invite if Bot is a member/admin
-                if bot_is_member:
-                    # 2. Video Count
-                    try:
-                        video_count = await Clients.bot.search_messages_count(
-                            chat_id=old_id, 
-                            filter=enums.MessagesFilter.VIDEO
-                        )
-                    except Exception as e:
-                        LOGGER.warning(f"[DEBUG] Video count failed for {old_id}: {e}")
-
-                    # 3. Document Count
-                    try:
-                        doc_count = await Clients.bot.search_messages_count(
-                            chat_id=old_id, 
-                            filter=enums.MessagesFilter.DOCUMENT
-                        )
-                    except Exception as e:
-                        LOGGER.warning(f"[DEBUG] Doc count failed for {old_id}: {e}")
-                    
-                    # 4. Invite Link
-                    try:
-                        invite_back = await Clients.bot.export_chat_invite_link(old_id)
-                    except Exception as e:
-                        LOGGER.warning(f"[DEBUG] Invite link export failed for {old_id}: {e}")
-                else:
-                    invite_back = "Bot not in channel - Cannot generate link"
+                    LOGGER.warning(f"[DEBUG] Bot failed to fetch info for {old_id}: {e}")
 
                 # --- NOTIFY BOT OWNER (You) ---
                 try:
@@ -137,6 +124,7 @@ class ChannelManager:
                 except Exception as e:
                     LOGGER.error(f"❌ Unknown error leaving {old_id}: {e}")
                 
+                # CRITICAL: Update DB
                 await Database.update_channel_membership(old_id, False)
                 
                 LOGGER.info("⏳ Cooling down 5s...")
