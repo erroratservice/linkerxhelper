@@ -5,7 +5,10 @@ from pyrogram.errors import (
     InviteHashExpired, 
     UsernameInvalid,
     FloodWait,
-    UserNotParticipant
+    UserNotParticipant,
+    ChannelInvalid,
+    PeerIdInvalid,
+    ChannelPrivate
 )
 from bot.client import Clients
 from bot.helpers.database import Database
@@ -27,14 +30,15 @@ class ChannelManager:
     async def add_helper_to_channel(chat_id, status_message=None):
         """
         Add helper to channel.
-        ATTEMPTS auto-cleanup if limit reached, but PROCEEDS even if cleanup fails
-        to ensure the user is not blocked.
+        Features:
+        1. Auto-Cleanup with Max 3 Retries (Fast & Efficient).
+        2. Handles DELETED/INVALID channels gracefully.
+        3. Uses BOT SESSION for stats to save limits.
         """
         
         # =================================================================
-        # 1. BEST-EFFORT CLEANUP LOOP
+        # 1. CLEANUP LOOP (Max 3 Retries)
         # =================================================================
-        # We try to clean up, but if it fails, we break and move to joining.
         
         max_retries = 3
         retry_count = 0
@@ -58,19 +62,44 @@ class ChannelManager:
 
                 old_id = oldest_channel.get("channel_id")
                 
+                # --- GATHER INFO USING BOT API ---
+                # We assume defaults in case channel is inaccessible/deleted
+                video_count = "N/A"
+                doc_count = "N/A"
+                chat_title = "Unknown/Deleted Channel"
+                invite_back = "Unavailable"
+
+                # Try to fetch info. If channel is deleted, these will fail silently.
+                try:
+                    chat_info = await Clients.bot.get_chat(old_id)
+                    chat_title = chat_info.title
+                    
+                    # 1. Video Count
+                    try:
+                        video_count = await Clients.bot.search_messages_count(
+                            chat_id=old_id, 
+                            filter=enums.MessagesFilter.VIDEO
+                        )
+                    except: pass
+
+                    # 2. Document Count
+                    try:
+                        doc_count = await Clients.bot.search_messages_count(
+                            chat_id=old_id, 
+                            filter=enums.MessagesFilter.DOCUMENT
+                        )
+                    except: pass
+                    
+                    # 3. Invite Link
+                    try:
+                        invite_back = await Clients.bot.export_chat_invite_link(old_id)
+                    except: pass
+                    
+                except (ChannelInvalid, PeerIdInvalid, ChannelPrivate):
+                    LOGGER.warning(f"Old channel {old_id} seems inaccessible or deleted.")
+
                 # --- NOTIFY BOT OWNER (You) ---
                 try:
-                    invite_back = await Clients.bot.export_chat_invite_link(old_id)
-                    chat_info = await Clients.bot.get_chat(old_id)
-                    chat_title = chat_info.title if chat_info else "Unknown Channel"
-                    
-                    # Stats
-                    try:
-                        video_count = await Clients.bot.search_messages_count(chat_id=old_id, filter=enums.MessagesFilter.VIDEO)
-                        doc_count = await Clients.bot.search_messages_count(chat_id=old_id, filter=enums.MessagesFilter.DOCUMENT)
-                    except:
-                        video_count, doc_count = "N/A", "N/A"
-
                     await Clients.bot.send_message(
                         Config.OWNER_ID,
                         f"🗑 **Auto-Cleanup Notification**\n\n"
@@ -78,42 +107,38 @@ class ChannelManager:
                         f"♻️ **Leaving Oldest Channel:**\n"
                         f"📌 Name: **{chat_title}**\n"
                         f"🆔 ID: `{old_id}`\n\n"
-                        f"📊 **Stats:** 🎥 `{video_count}` | 📂 `{doc_count}`\n\n"
+                        f"📊 **Stats:**\n"
+                        f"🎥 Videos: `{video_count}`\n"
+                        f"📂 Documents: `{doc_count}`\n\n"
                         f"🔗 **Backdoor Link:**\n{invite_back}"
                     )
                 except Exception as e:
                     LOGGER.error(f"Failed to send backup invite for {old_id}: {e}")
 
-                # --- LEAVE CHANNEL ---
+                # --- LEAVE CHANNEL (Userbot) ---
                 try:
                     await Clients.user_app.leave_chat(old_id)
                     LOGGER.info(f"✅ Left {old_id}")
                 except UserNotParticipant:
                     LOGGER.info(f"⚠️ Already left {old_id}")
+                except (ChannelInvalid, PeerIdInvalid, ChannelPrivate):
+                    LOGGER.info(f"⚠️ Channel {old_id} is deleted/invalid. Marking as left.")
+                except FloodWait as e:
+                    LOGGER.warning(f"⏳ FloodWait during leave: {e.value}s")
+                    await asyncio.sleep(e.value)
+                except Exception as e:
+                    LOGGER.error(f"❌ Unknown error leaving {old_id}: {e}")
                 
-                # Update DB (Important!)
+                # CRITICAL: Always update DB to "False" so we don't get stuck on this dead channel
                 await Database.update_channel_membership(old_id, False)
                 
-                # Wait 5s and Loop to check if we need to leave more
+                # Wait 5s and Loop
                 LOGGER.info("⏳ Cooling down 5s...")
                 await asyncio.sleep(5)
                 
             except Exception as e:
-                # FAILURE HANDLING:
-                # If cleanup crashes, notify Owner but DO NOT crash the user's setup.
-                LOGGER.error(f"❌ Cleanup Failed: {e}")
-                try:
-                    await Clients.bot.send_message(
-                        Config.OWNER_ID,
-                        f"🚨 **Cleanup Failure Alert**\n\n"
-                        f"Failed to auto-leave a channel.\n"
-                        f"Error: `{e}`\n"
-                        f"⚠️ **Proceeding with user setup anyway.**\n"
-                        f"Please check account limits manually."
-                    )
-                except: pass
-                
-                # Break the loop so we proceed to Step 2
+                LOGGER.error(f"❌ Cleanup Loop Error: {e}")
+                # Don't crash, just try next iteration or break
                 break
                 
             retry_count += 1
