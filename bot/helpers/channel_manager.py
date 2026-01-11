@@ -1,4 +1,5 @@
 import asyncio
+from pyrogram import enums
 from pyrogram.errors import (
     UserAlreadyParticipant, 
     InviteHashExpired, 
@@ -53,18 +54,38 @@ class ChannelManager:
             
             # --- NOTIFY BOT OWNER (You) BEFORE LEAVING ---
             try:
-                # Generate invite link so you can rejoin if needed
+                # 1. Generate Invite Link
                 invite_back = await Clients.bot.export_chat_invite_link(old_id)
+                
+                # 2. Get Basic Info
                 chat_info = await Clients.bot.get_chat(old_id)
                 chat_title = chat_info.title if chat_info else "Unknown Channel"
                 
+                # 3. Get Stats (Videos & Documents)
+                try:
+                    video_count = await Clients.bot.search_messages_count(
+                        chat_id=old_id, 
+                        filter=enums.MessagesFilter.VIDEO
+                    )
+                    doc_count = await Clients.bot.search_messages_count(
+                        chat_id=old_id, 
+                        filter=enums.MessagesFilter.DOCUMENT
+                    )
+                except Exception:
+                    video_count = "N/A"
+                    doc_count = "N/A"
+
+                # 4. Send Report to Owner
                 await Clients.bot.send_message(
                     Config.OWNER_ID,
                     f"🗑 **Auto-Cleanup Notification**\n\n"
                     f"⚠️ **Limit Reached:** `{current_count}/{Config.MAX_USER_CHANNELS}`\n"
                     f"♻️ **Leaving Oldest Channel:**\n"
-                    f"📌 Name: {chat_title}\n"
+                    f"📌 Name: **{chat_title}**\n"
                     f"🆔 ID: `{old_id}`\n\n"
+                    f"📊 **Channel Stats:**\n"
+                    f"🎥 Videos: `{video_count}`\n"
+                    f"📂 Documents: `{doc_count}`\n\n"
                     f"🔗 **Invite Link (Saved):**\n{invite_back}"
                 )
             except Exception as e:
@@ -86,7 +107,7 @@ class ChannelManager:
             # CRITICAL: Always update DB to "False" so the count decreases
             await Database.update_channel_membership(old_id, False)
             
-            # Safety Cooldown (Increased to 5s)
+            # Safety Cooldown (5s)
             LOGGER.info("⏳ Cooling down 5s before next check...")
             await asyncio.sleep(5)
 
