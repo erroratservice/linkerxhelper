@@ -47,9 +47,6 @@ class Database:
     async def is_channel_in_main_db(chat_id):
         """Check if channel exists in main Setup DB (Prevention Check)"""
         try:
-            # We look for ANY entry, even if user_is_member=False, to be safe.
-            # But strictly speaking, we care about active setups. 
-            # Let's check simply for existence of the ID document.
             doc = await Database.channels.find_one({"channel_id": chat_id})
             return doc is not None
         except Exception:
@@ -64,10 +61,20 @@ class Database:
             return 0
     
     @staticmethod
-    async def get_oldest_channel(exclude_id=None):
+    async def get_oldest_channel(exclude_ids=None):
+        """
+        Get oldest active channel, excluding a LIST of IDs.
+        Changed from exclude_id (single) to exclude_ids (list).
+        """
         query = {"user_is_member": True}
-        if exclude_id:
-            query["channel_id"] = {"$ne": exclude_id}
+        
+        if exclude_ids:
+            # Ensure it is a list and not empty
+            if isinstance(exclude_ids, list) and len(exclude_ids) > 0:
+                query["channel_id"] = {"$nin": exclude_ids}
+            elif isinstance(exclude_ids, int):
+                # Fallback for legacy calls if any
+                query["channel_id"] = {"$ne": exclude_ids}
         
         cursor = Database.channels.find(query).sort("user_joined_at", 1).limit(1)
         result = await cursor.to_list(length=1)
