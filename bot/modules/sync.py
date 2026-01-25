@@ -60,7 +60,10 @@ async def sync_all_channels(client, message):
                     LOGGER.info(f"Rejoining channel {chat_id} for sync")
                     await ChannelManager.add_helper_to_channel(chat_id)
                     rejoined += 1
-                    await asyncio.sleep(2)
+                    
+                    # FIX: Increased wait to 10s after rejoining
+                    LOGGER.info("⏳ Waiting 10s after rejoin...")
+                    await asyncio.sleep(10)
                 
                 # Sync bots
                 added_success, _ = await BotManager.process_bots(chat_id, "add", to_add)
@@ -72,6 +75,7 @@ async def sync_all_channels(client, message):
                 
                 processed += 1
                 LOGGER.info(f"✅ Synced channel {chat_id}")
+                
                 await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
             
             except Exception as e:
@@ -90,8 +94,8 @@ async def sync_all_channels(client, message):
                 except Exception as notify_err:
                     LOGGER.error(f"Failed to notify owner: {notify_err}")
             
-            # Update progress every 5 channels
-            if idx % 5 == 0:
+            # FIX: Update on 1st channel, then every 5th channel
+            if idx == 1 or idx % 5 == 0:
                 try:
                     await status.edit(
                         f"🔄 **Syncing...**\n\n"
@@ -100,8 +104,8 @@ async def sync_all_channels(client, message):
                         f"🔄 Rejoined: {rejoined}\n"
                         f"❌ Errors: {errors}"
                     )
-                except:
-                    pass
+                except Exception as e:
+                    LOGGER.warning(f"Status update failed: {e}")
         
         # Final message
         await status.edit(
