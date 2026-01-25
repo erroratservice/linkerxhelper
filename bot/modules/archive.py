@@ -233,13 +233,13 @@ async def help_archive_handler(client, message):
         except: pass
 
 # ==================================================================
-# 3. SYNC ARCHIVE COMMAND (With Pause Logic & 10s Safety)
+# 3. SYNC ARCHIVE COMMAND (With Multi-Tier Throttling)
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
     """
-    Advanced Maintenance with 'Traffic Light' Pause System.
+    Advanced Maintenance with Multi-Tier Adaptive Throttling.
     """
     status = await message.reply_text("♻️ **Starting Smart Archive Sync...**")
     
@@ -256,18 +256,18 @@ async def sync_archive_handler(client, message):
 
     for channel_data in channels:
         
-        # --- [TRAFFIC LIGHT] PAUSE LOGIC ---
+        # --- PAUSE LOGIC ---
         while len(ChannelManager.ACTIVE_SETUPS) > 0:
-            LOGGER.info(f"[SYNC] ⏸️ Paused due to active setup in {ChannelManager.ACTIVE_SETUPS}...")
-            try: await status.edit(f"⏸️ **Paused...**\nPriority Setup Running.\nWill resume shortly.")
+            LOGGER.info(f"[SYNC] ⏸️ Paused due to active setup...")
+            try: await status.edit(f"⏸️ **Paused...**\nPriority Setup Running.")
             except: pass
             await asyncio.sleep(5)
-        # -----------------------------------
+        # -------------------
 
         chat_id = channel_data.get("channel_id")
         processed += 1
         
-        # FIX: Update on 1st channel, then every 5th channel
+        # Update status on 1st channel, then every 5th channel
         if processed == 1 or processed % 5 == 0:
             try: 
                 await status.edit(
@@ -281,11 +281,8 @@ async def sync_archive_handler(client, message):
                 LOGGER.warning(f"Status update failed: {e}")
 
         try:
-            # ====================================================
             # STEP A: EXISTENCE CHECK
-            # ====================================================
             try:
-                # We try to get chat info. If this fails, channel is likely dead/inaccessible
                 await Clients.bot.get_chat(chat_id)
             except (ChannelInvalid, PeerIdInvalid, ChannelPrivate):
                 LOGGER.warning(f"[SYNC] 🗑 Channel {chat_id} is dead. Removing from DB.")
@@ -296,43 +293,32 @@ async def sync_archive_handler(client, message):
                 LOGGER.error(f"[SYNC] ⚠️ Error accessing {chat_id}: {e}")
                 continue
 
-            # ====================================================
             # STEP B: CHECK BOT STATUS
-            # ====================================================
             current_bots = set()
             try:
-                # Get all admins to see which bots are present
                 async for member in Clients.bot.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
                     if member.user.is_bot:
                         current_bots.add(member.user.username.lower())
             except Exception as e:
                 LOGGER.warning(f"[SYNC] Could not fetch admins for {chat_id}: {e}")
             
-            # Calculate missing bots
             missing_bots = required_bots - current_bots
             
             if not missing_bots:
-                # ALL BOTS PRESENT -> Healthy
                 await Database.archive_channels.update_one(
                     {"channel_id": chat_id},
                     {"$set": {"last_updated": datetime.utcnow()}}
                 )
                 skipped += 1
-                
-                # Check if Helper is lingering in a healthy channel
                 try:
                     await Clients.user_app.leave_chat(chat_id)
                     LOGGER.info(f"[SYNC] Helper removed from healthy channel {chat_id}")
                 except: pass
-                
                 continue
 
-            # ====================================================
-            # STEP C: REPAIR (Bots are missing)
-            # ====================================================
+            # STEP C: REPAIR
             LOGGER.info(f"[SYNC] 🔧 Repairing {chat_id}. Missing: {len(missing_bots)}")
             
-            # 1. Check/Add Helper
             helper_me = await Clients.user_app.get_me()
             helper_in_chat = False
             
@@ -347,7 +333,6 @@ async def sync_archive_handler(client, message):
             if not helper_in_chat:
                 LOGGER.info(f"[SYNC] ➕ Adding Helper to {chat_id}...")
                 try:
-                    # FIX: Use ChannelManager to JOIN via LINK
                     await ChannelManager.add_helper_to_channel(chat_id, status_message=None)
                     
                     # SAFETY: Wait 10s AFTER JOINING
@@ -355,9 +340,8 @@ async def sync_archive_handler(client, message):
                     await asyncio.sleep(10)
                 except Exception as e:
                     LOGGER.error(f"[SYNC] ❌ Failed to add Helper to {chat_id}: {e}")
-                    continue # Cannot proceed without helper
+                    continue 
 
-            # 2. Add Missing Bots (Using Helper)
             bots_to_install = [f"@{b}" for b in missing_bots]
             
             try:
@@ -366,10 +350,20 @@ async def sync_archive_handler(client, message):
             except Exception as e:
                 LOGGER.error(f"[SYNC] Failed to install bots in {chat_id}: {e}")
 
-            # 3. Helper Cleanup
-            # SAFETY: Wait 10s BEFORE LEAVING
-            LOGGER.info(f"[SYNC] ⏳ Waiting 10s before leaving {chat_id}...")
-            await asyncio.sleep(10) 
+            # --- ADAPTIVE THROTTLING ---
+            bots_count = len(bots_to_install)
+            
+            if bots_count < 5:
+                leave_delay = 30
+            elif 5 <= bots_count < 10:
+                leave_delay = 25
+            elif 10 <= bots_count < 20:
+                leave_delay = 20
+            else:
+                leave_delay = 10
+            
+            LOGGER.info(f"[SYNC] ⏳ Waiting {leave_delay}s before leaving (Batch size: {bots_count})...")
+            await asyncio.sleep(leave_delay) 
             
             try:
                 await Clients.user_app.leave_chat(chat_id)
