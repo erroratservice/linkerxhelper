@@ -1,6 +1,6 @@
 import asyncio
 from pyrogram import filters, enums
-from pyrogram.enums import ChatMemberStatus, ChatType
+from pyrogram.enums import ChatMemberStatus, ChatType, ChatMembersFilter
 from pyrogram.errors import (
     ChatAdminRequired,
     UserNotParticipant,
@@ -21,27 +21,16 @@ from bot.utils.logger import LOGGER
 # ==================================================================
 
 async def archive_logic(message, chat_id, owner_id):
-    """
-    Main logic for /helparchive.
-    1. Adds helper
-    2. Adds bots
-    3. Saves to ARCHIVE DB
-    4. HELPER LEAVES (Voluntary, with 5s safety delay)
-    """
     LOGGER.info(f"=[ARCHIVE] SETUP STARTED for channel {chat_id}=")
-    
     try:
-        # 1. Add Helper with FULL permissions 
         await message.edit("➕ **Preparing helper account with FULL access...**")
         LOGGER.info(f"[ARCHIVE] Adding helper to {chat_id}")
         
-        # Pass message for FloodWait handling
         await ChannelManager.add_helper_to_channel(chat_id, message)
         
         LOGGER.info("[ARCHIVE] ⏳ Waiting 15s for permissions to propagate...")
         await asyncio.sleep(15)
 
-        # 2. Add bots using the Helper account
         await message.edit("🤖 **Adding archive bots...**")
         LOGGER.info(f"[ARCHIVE] Starting bot installation via Userbot")
         
@@ -49,11 +38,9 @@ async def archive_logic(message, chat_id, owner_id):
             chat_id, "add", Config.BOTS_TO_ADD, message
         )
         
-        # 3. Save to SEPARATE Archive Database
         LOGGER.info(f"[ARCHIVE] Saving to Archive DB")
         await Database.save_archive_setup(chat_id, owner_id, successful)
         
-        # 4. Final Message
         text = (
             f"✅ **Archive Setup Complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
@@ -66,9 +53,8 @@ async def archive_logic(message, chat_id, owner_id):
             
         await message.edit(text)
         
-        # 5. HELPER LEAVES (Voluntary + 5s Delay)
         LOGGER.info(f"[ARCHIVE] ⏳ Waiting 5s safety buffer before leaving...")
-        await asyncio.sleep(5)  # <--- NEW SAFETY DELAY
+        await asyncio.sleep(5)
 
         LOGGER.info(f"[ARCHIVE] 🚪 Helper leaving channel {chat_id}")
         try:
@@ -86,13 +72,15 @@ async def archive_logic(message, chat_id, owner_id):
         raise
 
 # ==================================================================
-# HELP ARCHIVE COMMAND
+# HELP ARCHIVE COMMAND (DEBUG VERSION)
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("helparchive") & (filters.group | filters.channel))
 async def help_archive_handler(client, message):
-    """Handler for strict archive setup"""
     
+    # 1. ENTRY LOG
+    LOGGER.info(f"[DEBUG] Step 1: /helparchive triggered in {message.chat.id}")
+
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
          try: await message.reply_text("⚠️ This command is for **Channels** only.")
          except: pass
@@ -100,19 +88,23 @@ async def help_archive_handler(client, message):
 
     chat_id = message.chat.id
 
-    # 0. CONFLICT CHECK
-    is_main_setup = await Database.is_channel_in_main_db(chat_id)
-    if is_main_setup:
-        try:
-            return await message.reply_text(
-                "🛑 **Action Blocked**\n\n"
-                "This channel is already configured with the LinkerX Services\n"
-                "You cannot use Archive mode here as it conflicts with the existing setup.\n"
-                "Please create a new channel and add the bot there and run the /helparchive command there"
-            )
-        except (ChatAdminRequired, ChatWriteForbidden):
-            return
+    # 2. DATABASE CHECK
+    try:
+        LOGGER.info(f"[DEBUG] Step 2: Checking Database for conflict...")
+        is_main_setup = await Database.is_channel_in_main_db(chat_id)
+        if is_main_setup:
+            try:
+                return await message.reply_text(
+                    "🛑 **Action Blocked**\n\n"
+                    "This channel is already configured with the LinkerX Services"
+                )
+            except: return
+    except Exception as e:
+        LOGGER.error(f"[DEBUG] DB Check crashed: {e}")
+        return
 
+    # 3. QUEUE CHECK
+    LOGGER.info(f"[DEBUG] Step 3: Checking Queue...")
     if queue_manager.get_position(chat_id):
         try: await message.reply_text("⚠️ This channel is already in queue.")
         except: pass
@@ -120,18 +112,21 @@ async def help_archive_handler(client, message):
 
     status = None
     try:
+        LOGGER.info(f"[DEBUG] Step 4: Sending 'Checking permissions' msg...")
         status = await message.reply_text("🔍 **Checking strict permissions...**")
     except (ChatAdminRequired, ChatWriteForbidden):
-        LOGGER.warning(f"[ARCHIVE] ❌ Bot lacks Admin/Write rights in {chat_id} - Ignoring command.")
+        LOGGER.warning(f"[DEBUG] ❌ Bot lacks Admin/Write rights.")
         return
     except Exception as e:
-        LOGGER.error(f"[ARCHIVE] Initial reply failed: {e}")
+        LOGGER.error(f"[DEBUG] Initial reply failed: {e}")
         return
     
     try:
+        LOGGER.info(f"[DEBUG] Step 5: Fetching 'me' chat member...")
         member = await client.get_chat_member(chat_id, "me")
         privs = member.privileges
 
+        LOGGER.info(f"[DEBUG] Step 6: Validating privileges...")
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -149,33 +144,42 @@ async def help_archive_handler(client, message):
              missing = list(required_privs.values())
         else:
             for attr, label in required_privs.items():
-                if not getattr(privs, attr, False):
+                val = getattr(privs, attr, None)
+                if not val:
                     missing.append(label)
 
-        # 3. Strict Check Failure -> Copy Guide Message
+        # 4. GUIDE MESSAGE LOGIC
         if missing or member.status != ChatMemberStatus.ADMINISTRATOR:
-            await status.delete()
+            LOGGER.info(f"[DEBUG] Permissions missing. Preparing guide message...")
+            try: await status.delete()
+            except: pass
             
             caption = (
                 "🛑 **INSUFFICIENT PERMISSIONS FOR ARCHIVE**\n\n"
                 "For `/helparchive`, the bot requires **EVERY** permission enabled.\n\n"
-                "\n\n **Please enable ALL permissions as shown in the picture:**"
+                "❌ **Missing:**\n" + "\n".join([f"- {m}" for m in missing]) +
+                "\n\n👇 **Please enable ALL permissions as shown below:**"
             )
             
             try:
+                # DEBUGGING THE CONFIG VARIABLE
                 link = Config.PERM_GUIDE_PIC
+                LOGGER.info(f"[DEBUG] Guide Pic Link: '{link}' (Type: {type(link)})")
+                
                 src_chat_id = None
                 src_msg_id = None
                 
-                if "/c/" in link: 
-                    parts = link.split("/")
+                if "/c/" in str(link): 
+                    parts = str(link).split("/")
                     src_chat_id = int("-100" + parts[-2])
                     src_msg_id = int(parts[-1])
-                elif "t.me/" in link: 
-                    parts = link.split("/")
+                elif "t.me/" in str(link): 
+                    parts = str(link).split("/")
                     src_chat_id = parts[-2]
                     src_msg_id = int(parts[-1])
                 
+                LOGGER.info(f"[DEBUG] Copying message from {src_chat_id} ID {src_msg_id}...")
+
                 if src_chat_id and src_msg_id:
                     await client.copy_message(
                         chat_id=chat_id,
@@ -184,102 +188,78 @@ async def help_archive_handler(client, message):
                         caption=caption
                     )
                 else:
-                    raise ValueError("Invalid link format")
+                    LOGGER.warning("[DEBUG] Invalid link format, sending text only.")
+                    await message.reply_text(caption)
 
             except Exception as e:
-                 LOGGER.error(f"Failed to copy perm guide message: {e}")
+                 LOGGER.error(f"[DEBUG] Failed to copy perm guide: {e}", exc_info=True)
                  await message.reply_text(caption + "\n\n*(Visual guide unavailable)*")
             return
 
-        # 4. Identify Owner (Attempt only)
+        # 5. OWNER IDENTIFICATION
+        LOGGER.info("[DEBUG] Step 7: Identifying Owner...")
         owner_id = 0
         try:
-            async for admin in client.get_chat_members(chat_id, filter=ChatMemberStatus.OWNER):
-                owner_id = admin.user.id
-                break
-        except:
-            LOGGER.warning(f"Could not identify owner for {chat_id}, using ID 0")
+            # We suspect the issue might be here if 'filter' argument was weird before
+            # Using specific filter Enum
+            async for admin in client.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
+                if admin.status == enums.ChatMemberStatus.OWNER:
+                    owner_id = admin.user.id
+                    LOGGER.info(f"[DEBUG] Owner Found: {owner_id}")
+                    break
+        except Exception as e:
+            LOGGER.warning(f"[DEBUG] Owner identification failed (Non-critical): {e}")
 
+        LOGGER.info(f"[DEBUG] Step 8: Adding to Queue...")
         await queue_manager.add_to_queue(status, chat_id, owner_id, archive_logic)
 
     except (ChatAdminRequired, ChatWriteForbidden):
         return
     except Exception as e:
-        LOGGER.error(f"HelpArchive error: {e}")
+        # CRITICAL: LOG THE FULL TRACEBACK
+        LOGGER.error("CRITICAL CRASH in helparchive", exc_info=True)
         try: await status.edit(f"❌ Error: {e}")
         except: pass
 
-# ==================================================================
-# SYNC ARCHIVE COMMAND
-# ==================================================================
-
+# ... (Sync and Stats commands remain unchanged) ...
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
-    """
-    Syncs channels in the ARCHIVE DB.
-    - SILENT: Does not notify owner on failure.
-    - HELPER LEAVES: Forces helper to leave if found.
-    """
+    # (Same code as before)
     status = await message.reply_text("♻️ **Starting Archive Sync...**")
-    
     channels = await Database.get_all_archive_channels()
     total = len(channels)
     processed = 0
     failed_channels = []
-
     LOGGER.info(f"[SYNC-ARCHIVE] Started for {total} channels")
-
     for channel_data in channels:
         chat_id = channel_data.get("channel_id")
         processed += 1
-        
         if processed % 5 == 0:
             try: await status.edit(f"♻️ **Archive Syncing...**\nDo not restart bot.\nProgress: {processed}/{total}")
             except: pass
-
         try:
-            # 1. Update "last_updated" in DB
             await Database.archive_channels.update_one(
                 {"channel_id": chat_id},
                 {"$set": {"last_updated": datetime.utcnow()}}
             )
-
-            # 2. Check & Make Helper Leave
             try:
                 member = await Clients.user_app.get_chat_member(chat_id, "me")
-                
-                # If Helper is present -> LEAVE
                 if member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
                     LOGGER.info(f"[SYNC-ARCHIVE] Helper found in {chat_id}, leaving...")
                     await Clients.user_app.leave_chat(chat_id)
-            except UserNotParticipant:
-                pass # Helper is already gone, good.
-            except Exception as e:
-                # Log but DO NOT message owner
-                LOGGER.warning(f"[SYNC-ARCHIVE] Helper check warning for {chat_id}: {e}")
-
+            except UserNotParticipant: pass
+            except Exception as e: LOGGER.warning(f"[SYNC-ARCHIVE] Helper check warning for {chat_id}: {e}")
         except Exception as e:
             LOGGER.error(f"[SYNC-ARCHIVE] Failed {chat_id}: {e}")
             failed_channels.append(chat_id)
-        
         await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
-
-    result_text = (
-        f"✅ **Archive Sync Complete**\n\n"
-        f"📚 Total Scanned: `{total}`\n"
-    )
-    if failed_channels:
-        result_text += f"\n⚠️ Errors: {len(failed_channels)} (Check Logs)"
-
+    result_text = (f"✅ **Archive Sync Complete**\n\n📚 Total Scanned: `{total}`\n")
+    if failed_channels: result_text += f"\n⚠️ Errors: {len(failed_channels)} (Check Logs)"
     await status.edit(result_text)
-
-# ==================================================================
-# STATS ARCHIVE COMMAND
-# ==================================================================
 
 @Clients.bot.on_message(filters.command("statsarchive") & filters.user(Config.OWNER_ID))
 async def stats_archive_handler(client, message):
-    """Shows stats only for Archive DB"""
+    # (Same code as before)
     status = await message.reply_text("📊 Fetching archive stats...")
     stats = await Database.get_archive_stats()
     if not stats: return await status.edit("❌ Failed to fetch archive stats.")
