@@ -72,14 +72,13 @@ async def archive_logic(message, chat_id, owner_id):
         raise
 
 # ==================================================================
-# HELP ARCHIVE COMMAND (DEBUG VERSION)
+# HELP ARCHIVE COMMAND (DEEP DEBUG VERSION)
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("helparchive") & (filters.group | filters.channel))
 async def help_archive_handler(client, message):
     
-    # 1. ENTRY LOG
-    LOGGER.info(f"[DEBUG] Step 1: /helparchive triggered in {message.chat.id}")
+    LOGGER.info(f"[DEBUG] /helparchive triggered in {message.chat.id}")
 
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
          try: await message.reply_text("⚠️ This command is for **Channels** only.")
@@ -88,45 +87,42 @@ async def help_archive_handler(client, message):
 
     chat_id = message.chat.id
 
-    # 2. DATABASE CHECK
-    try:
-        LOGGER.info(f"[DEBUG] Step 2: Checking Database for conflict...")
-        is_main_setup = await Database.is_channel_in_main_db(chat_id)
-        if is_main_setup:
-            try:
-                return await message.reply_text(
-                    "🛑 **Action Blocked**\n\n"
-                    "This channel is already configured with the LinkerX Services"
-                )
-            except: return
-    except Exception as e:
-        LOGGER.error(f"[DEBUG] DB Check crashed: {e}")
-        return
-
-    # 3. QUEUE CHECK
-    LOGGER.info(f"[DEBUG] Step 3: Checking Queue...")
+    # 1. QUEUE CHECK
     if queue_manager.get_position(chat_id):
         try: await message.reply_text("⚠️ This channel is already in queue.")
         except: pass
         return
 
+    # 2. STATUS MESSAGE
     status = None
     try:
-        LOGGER.info(f"[DEBUG] Step 4: Sending 'Checking permissions' msg...")
-        status = await message.reply_text("🔍 **Checking strict permissions...**")
+        status = await message.reply_text("🔍 **Checking permissions...**")
     except (ChatAdminRequired, ChatWriteForbidden):
-        LOGGER.warning(f"[DEBUG] ❌ Bot lacks Admin/Write rights.")
+        LOGGER.warning(f"[DEBUG] ❌ Bot lacks basic Write rights.")
         return
     except Exception as e:
         LOGGER.error(f"[DEBUG] Initial reply failed: {e}")
         return
     
+    # 3. DATABASE CHECK
     try:
-        LOGGER.info(f"[DEBUG] Step 5: Fetching 'me' chat member...")
-        member = await client.get_chat_member(chat_id, "me")
-        privs = member.privileges
+        is_main_setup = await Database.is_channel_in_main_db(chat_id)
+        if is_main_setup:
+            await status.edit("🛑 **Action Blocked**\nChannel already configured in Main DB.")
+            return
+    except Exception as e:
+        LOGGER.error(f"[DEBUG] DB Check failed: {e}")
 
-        LOGGER.info(f"[DEBUG] Step 6: Validating privileges...")
+    try:
+        # RE-FETCH CHAT MEMBER TO ENSURE FRESH DATA
+        LOGGER.info(f"[DEBUG] Fetching fresh chat member data for bot...")
+        member = await client.get_chat_member(chat_id, "me")
+        
+        # --- RAW DATA DUMP ---
+        LOGGER.info(f"[DEBUG] RAW Member Status: {member.status}")
+        LOGGER.info(f"[DEBUG] RAW Privileges Object: {member.privileges}")
+
+        privs = member.privileges
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -140,46 +136,55 @@ async def help_archive_handler(client, message):
         }
 
         missing = []
+
+        # Explicit Admin Status Check
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            LOGGER.warning(f"[DEBUG] ❌ Bot is NOT administrator. Status: {member.status}")
+            missing.append("Bot must be an Administrator")
+
         if not privs:
-             missing = list(required_privs.values())
+            LOGGER.warning("[DEBUG] ❌ Privileges object is None!")
+            missing.extend(list(required_privs.values()))
         else:
+            LOGGER.info("[DEBUG] --- Checking Individual Permissions ---")
             for attr, label in required_privs.items():
-                val = getattr(privs, attr, None)
-                if not val:
+                # Check value safely
+                has_perm = getattr(privs, attr, False)
+                LOGGER.info(f"[DEBUG] Checking '{attr}' ({label})... Found: {has_perm}")
+                
+                if not has_perm:
                     missing.append(label)
 
-        # 4. GUIDE MESSAGE LOGIC
-        if missing or member.status != ChatMemberStatus.ADMINISTRATOR:
-            LOGGER.info(f"[DEBUG] Permissions missing. Preparing guide message...")
+        # 4. IF MISSING PERMISSIONS -> SHOW GUIDE
+        if missing:
+            LOGGER.info(f"[DEBUG] ❌ Missing List: {missing}")
             try: await status.delete()
             except: pass
             
             caption = (
-                "🛑 **INSUFFICIENT PERMISSIONS FOR ARCHIVE**\n\n"
-                "For `/helparchive`, the bot requires **EVERY** permission enabled.\n\n"
+                "🛑 **INSUFFICIENT PERMISSIONS**\n\n"
+                "The bot requires **EVERY** permission enabled.\n\n"
                 "❌ **Missing:**\n" + "\n".join([f"- {m}" for m in missing]) +
-                "\n\n👇 **Please enable ALL permissions as shown below:**"
+                "\n\n👇 **Please enable ALL permissions as shown:**"
             )
             
+            # SAFE GUIDE SENDING
             try:
-                # DEBUGGING THE CONFIG VARIABLE
-                link = Config.PERM_GUIDE_PIC
-                LOGGER.info(f"[DEBUG] Guide Pic Link: '{link}' (Type: {type(link)})")
+                link = str(Config.PERM_GUIDE_PIC)
+                LOGGER.info(f"[DEBUG] Sending guide using link: {link}")
                 
                 src_chat_id = None
                 src_msg_id = None
                 
-                if "/c/" in str(link): 
-                    parts = str(link).split("/")
+                if "/c/" in link: 
+                    parts = link.split("/")
                     src_chat_id = int("-100" + parts[-2])
                     src_msg_id = int(parts[-1])
-                elif "t.me/" in str(link): 
-                    parts = str(link).split("/")
+                elif "t.me/" in link: 
+                    parts = link.split("/")
                     src_chat_id = parts[-2]
                     src_msg_id = int(parts[-1])
                 
-                LOGGER.info(f"[DEBUG] Copying message from {src_chat_id} ID {src_msg_id}...")
-
                 if src_chat_id and src_msg_id:
                     await client.copy_message(
                         chat_id=chat_id,
@@ -188,43 +193,37 @@ async def help_archive_handler(client, message):
                         caption=caption
                     )
                 else:
-                    LOGGER.warning("[DEBUG] Invalid link format, sending text only.")
                     await message.reply_text(caption)
-
             except Exception as e:
-                 LOGGER.error(f"[DEBUG] Failed to copy perm guide: {e}", exc_info=True)
+                 LOGGER.error(f"[DEBUG] Failed to send guide: {e}")
                  await message.reply_text(caption + "\n\n*(Visual guide unavailable)*")
             return
 
-        # 5. OWNER IDENTIFICATION
-        LOGGER.info("[DEBUG] Step 7: Identifying Owner...")
+        # 5. FIND OWNER
+        LOGGER.info("[DEBUG] Permissions OK. Finding owner...")
         owner_id = 0
         try:
-            # We suspect the issue might be here if 'filter' argument was weird before
-            # Using specific filter Enum
             async for admin in client.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
                 if admin.status == enums.ChatMemberStatus.OWNER:
                     owner_id = admin.user.id
-                    LOGGER.info(f"[DEBUG] Owner Found: {owner_id}")
+                    LOGGER.info(f"[DEBUG] Owner found: {owner_id}")
                     break
         except Exception as e:
-            LOGGER.warning(f"[DEBUG] Owner identification failed (Non-critical): {e}")
+            LOGGER.warning(f"[DEBUG] Owner check failed: {e}")
 
-        LOGGER.info(f"[DEBUG] Step 8: Adding to Queue...")
+        # 6. START LOGIC
+        LOGGER.info("[DEBUG] Adding to processing queue...")
         await queue_manager.add_to_queue(status, chat_id, owner_id, archive_logic)
 
-    except (ChatAdminRequired, ChatWriteForbidden):
-        return
     except Exception as e:
-        # CRITICAL: LOG THE FULL TRACEBACK
         LOGGER.error("CRITICAL CRASH in helparchive", exc_info=True)
         try: await status.edit(f"❌ Error: {e}")
         except: pass
 
-# ... (Sync and Stats commands remain unchanged) ...
+# ... (Sync and Stats handlers remain unchanged) ...
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
-    # (Same code as before)
+    # (Existing sync logic...)
     status = await message.reply_text("♻️ **Starting Archive Sync...**")
     channels = await Database.get_all_archive_channels()
     total = len(channels)
@@ -259,7 +258,7 @@ async def sync_archive_handler(client, message):
 
 @Clients.bot.on_message(filters.command("statsarchive") & filters.user(Config.OWNER_ID))
 async def stats_archive_handler(client, message):
-    # (Same code as before)
+    # (Existing stats logic...)
     status = await message.reply_text("📊 Fetching archive stats...")
     stats = await Database.get_archive_stats()
     if not stats: return await status.edit("❌ Failed to fetch archive stats.")
