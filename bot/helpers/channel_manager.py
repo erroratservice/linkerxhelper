@@ -130,8 +130,8 @@ class ChannelManager:
                 # CRITICAL: Update DB
                 await Database.update_channel_membership(old_id, False)
                 
-                LOGGER.info("⏳ Cooling down 5s...")
-                await asyncio.sleep(5)
+                LOGGER.info("⏳ Cooling down 10s...")
+                await asyncio.sleep(10)
                 
             except Exception as e:
                 LOGGER.error(f"❌ Cleanup Loop Error: {e}")
