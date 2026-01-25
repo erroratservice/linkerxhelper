@@ -31,6 +31,15 @@ async def sync_all_channels(client, message):
         LOGGER.info(f"Starting sync for {total} channels")
         
         for idx, ch in enumerate(channels, 1):
+            
+            # --- [TRAFFIC LIGHT] PAUSE LOGIC ---
+            while len(ChannelManager.ACTIVE_SETUPS) > 0:
+                LOGGER.info(f"[SYNC-MAIN] ⏸️ Paused due to active setup in {ChannelManager.ACTIVE_SETUPS}...")
+                try: await status.edit(f"⏸️ **Paused...**\nPriority Setup Running.\nWill resume shortly.")
+                except: pass
+                await asyncio.sleep(5)
+            # -----------------------------------
+
             chat_id = ch["channel_id"]
             current = set(ch.get("installed_bots", []))
             wanted = set(Config.BOTS_TO_ADD)
