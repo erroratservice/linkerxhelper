@@ -17,6 +17,10 @@ from bot.utils.logger import LOGGER
 
 class ChannelManager:
     
+    # GLOBAL SET: Stores IDs of channels currently being set up.
+    # Used to pause Sync tasks and protect channels from auto-cleanup.
+    ACTIVE_SETUPS = set()
+    
     @staticmethod
     async def check_helper_membership(chat_id):
         """Check if helper is part of the chat"""
@@ -30,9 +34,10 @@ class ChannelManager:
     async def add_helper_to_channel(chat_id, status_message=None):
         """
         Add helper to channel.
-        - Uses USER APP for Stats (Required by API).
-        - Uses BOT APP for Admin tasks (Save Limits).
+        - Uses USER APP for Stats.
+        - Uses BOT APP for Admin tasks.
         - Max 3 Retries.
+        - PROTECTS active setups from cleanup.
         """
         
         # =================================================================
@@ -52,10 +57,16 @@ class ChannelManager:
             LOGGER.info(f"⚠️ Limit Hit: ({current_count}/{Config.MAX_USER_CHANNELS}). Attempting cleanup...")
             
             try:
-                oldest_channel = await Database.get_oldest_channel(exclude_id=chat_id)
+                # --- BUILD EXCLUSION LIST ---
+                # Exclude the channel we are trying to join + all currently active setups
+                exclusions = list(ChannelManager.ACTIVE_SETUPS)
+                if chat_id not in exclusions:
+                    exclusions.append(chat_id)
+
+                oldest_channel = await Database.get_oldest_channel(exclude_ids=exclusions)
                 
                 if not oldest_channel:
-                    LOGGER.warning("🚨 Limit reached but DB returned no eligible channel to leave! Proceeding anyway.")
+                    LOGGER.warning("🚨 Limit reached but NO eligible channel to leave (All active/protected)! Proceeding anyway.")
                     break
 
                 old_id = oldest_channel.get("channel_id")
@@ -66,26 +77,20 @@ class ChannelManager:
                 chat_title = "Unknown/Deleted"
                 invite_back = "Unavailable"
 
-                # 1. FETCH STATS (Must use USER APP due to API Limits)
-                # This is lightweight metadata fetching, safe for Userbot.
+                # 1. FETCH STATS (Userbot)
                 try:
                     video_count = await Clients.user_app.search_messages_count(
-                        chat_id=old_id, 
-                        filter=enums.MessagesFilter.VIDEO
+                        chat_id=old_id, filter=enums.MessagesFilter.VIDEO
                     )
-                except Exception: 
-                    pass
+                except Exception: pass
 
                 try:
                     doc_count = await Clients.user_app.search_messages_count(
-                        chat_id=old_id, 
-                        filter=enums.MessagesFilter.DOCUMENT
+                        chat_id=old_id, filter=enums.MessagesFilter.DOCUMENT
                     )
-                except Exception: 
-                    pass
+                except Exception: pass
 
-                # 2. FETCH ADMIN INFO (Use BOT APP to save Userbot limits)
-                # The Bot is an admin, so it can generate links and see titles.
+                # 2. FETCH ADMIN INFO (Bot)
                 try:
                     chat_info = await Clients.bot.get_chat(old_id)
                     chat_title = chat_info.title
@@ -93,7 +98,7 @@ class ChannelManager:
                 except Exception as e:
                     LOGGER.warning(f"[DEBUG] Bot failed to fetch info for {old_id}: {e}")
 
-                # --- NOTIFY BOT OWNER (You) ---
+                # --- NOTIFY BOT OWNER ---
                 try:
                     await Clients.bot.send_message(
                         Config.OWNER_ID,
@@ -110,14 +115,12 @@ class ChannelManager:
                 except Exception as e:
                     LOGGER.error(f"Failed to send notification to Owner: {e}")
 
-                # --- LEAVE CHANNEL (Userbot) ---
+                # --- LEAVE CHANNEL ---
                 try:
                     await Clients.user_app.leave_chat(old_id)
                     LOGGER.info(f"✅ Left {old_id}")
-                except UserNotParticipant:
-                    LOGGER.info(f"⚠️ Already left {old_id}")
-                except (ChannelInvalid, PeerIdInvalid, ChannelPrivate):
-                    LOGGER.info(f"⚠️ Channel {old_id} is deleted/invalid.")
+                except (UserNotParticipant, ChannelInvalid, PeerIdInvalid, ChannelPrivate):
+                    LOGGER.info(f"⚠️ Already left/invalid {old_id}")
                 except FloodWait as e:
                     LOGGER.warning(f"⏳ FloodWait during leave: {e.value}s")
                     await asyncio.sleep(e.value)
