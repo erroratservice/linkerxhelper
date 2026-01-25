@@ -32,13 +32,13 @@ async def sync_all_channels(client, message):
         
         for idx, ch in enumerate(channels, 1):
             
-            # --- [TRAFFIC LIGHT] PAUSE LOGIC ---
+            # --- PAUSE LOGIC ---
             while len(ChannelManager.ACTIVE_SETUPS) > 0:
-                LOGGER.info(f"[SYNC-MAIN] ⏸️ Paused due to active setup in {ChannelManager.ACTIVE_SETUPS}...")
-                try: await status.edit(f"⏸️ **Paused...**\nPriority Setup Running.\nWill resume shortly.")
+                LOGGER.info(f"[SYNC-MAIN] ⏸️ Paused due to active setup...")
+                try: await status.edit(f"⏸️ **Paused...**\nPriority Setup Running.")
                 except: pass
                 await asyncio.sleep(5)
-            # -----------------------------------
+            # -------------------
 
             chat_id = ch["channel_id"]
             current = set(ch.get("installed_bots", []))
@@ -56,12 +56,11 @@ async def sync_all_channels(client, message):
                 is_member = await ChannelManager.check_helper_membership(chat_id)
                 
                 if not is_member:
-                    # Need to rejoin
                     LOGGER.info(f"Rejoining channel {chat_id} for sync")
                     await ChannelManager.add_helper_to_channel(chat_id)
                     rejoined += 1
                     
-                    # FIX: Increased wait to 10s after rejoining
+                    # Wait 10s after joining
                     LOGGER.info("⏳ Waiting 10s after rejoin...")
                     await asyncio.sleep(10)
                 
@@ -76,7 +75,26 @@ async def sync_all_channels(client, message):
                 processed += 1
                 LOGGER.info(f"✅ Synced channel {chat_id}")
                 
-                await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
+                # --- ADAPTIVE THROTTLING ---
+                bots_count = len(to_add)
+                if bots_count < 5:
+                    leave_delay = 30
+                elif 5 <= bots_count < 10:
+                    leave_delay = 25
+                elif 10 <= bots_count < 20:
+                    leave_delay = 20
+                else:
+                    leave_delay = 10
+                
+                if not is_member:
+                    LOGGER.info(f"[SYNC] ⏳ Waiting {leave_delay}s before leaving (Batch size: {bots_count})...")
+                    await asyncio.sleep(leave_delay)
+                    try:
+                        await Clients.user_app.leave_chat(chat_id)
+                    except: pass
+                else:
+                    # Even if we were already member, we should wait if we did work
+                    await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
             
             except Exception as e:
                 errors += 1
@@ -94,7 +112,7 @@ async def sync_all_channels(client, message):
                 except Exception as notify_err:
                     LOGGER.error(f"Failed to notify owner: {notify_err}")
             
-            # FIX: Update on 1st channel, then every 5th channel
+            # Update status on 1st channel, then every 5th channel
             if idx == 1 or idx % 5 == 0:
                 try:
                     await status.edit(
