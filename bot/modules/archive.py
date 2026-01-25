@@ -72,7 +72,7 @@ async def archive_logic(message, chat_id, owner_id):
         raise
 
 # ==================================================================
-# HELP ARCHIVE COMMAND (DEEP DEBUG VERSION)
+# HELP ARCHIVE COMMAND
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("helparchive") & (filters.group | filters.channel))
@@ -114,15 +114,13 @@ async def help_archive_handler(client, message):
         LOGGER.error(f"[DEBUG] DB Check failed: {e}")
 
     try:
-        # RE-FETCH CHAT MEMBER TO ENSURE FRESH DATA
         LOGGER.info(f"[DEBUG] Fetching fresh chat member data for bot...")
         member = await client.get_chat_member(chat_id, "me")
         
-        # --- RAW DATA DUMP ---
-        LOGGER.info(f"[DEBUG] RAW Member Status: {member.status}")
-        LOGGER.info(f"[DEBUG] RAW Privileges Object: {member.privileges}")
-
         privs = member.privileges
+        
+        # --- FIXED REQUIREMENTS ---
+        # Removed 'can_manage_topics' as it fails in non-forum channels
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -131,8 +129,7 @@ async def help_archive_handler(client, message):
             "can_delete_messages": "Delete Messages",
             "can_invite_users": "Invite Users via Link",
             "can_promote_members": "Add New Admins",
-            "can_manage_video_chats": "Manage Video Chats",
-            "can_manage_topics": "Manage Topics" 
+            "can_manage_video_chats": "Manage Video Chats"
         }
 
         missing = []
@@ -148,7 +145,6 @@ async def help_archive_handler(client, message):
         else:
             LOGGER.info("[DEBUG] --- Checking Individual Permissions ---")
             for attr, label in required_privs.items():
-                # Check value safely
                 has_perm = getattr(privs, attr, False)
                 LOGGER.info(f"[DEBUG] Checking '{attr}' ({label})... Found: {has_perm}")
                 
@@ -168,7 +164,6 @@ async def help_archive_handler(client, message):
                 "\n\n👇 **Please enable ALL permissions as shown:**"
             )
             
-            # SAFE GUIDE SENDING
             try:
                 link = str(Config.PERM_GUIDE_PIC)
                 LOGGER.info(f"[DEBUG] Sending guide using link: {link}")
@@ -223,7 +218,6 @@ async def help_archive_handler(client, message):
 # ... (Sync and Stats handlers remain unchanged) ...
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
-    # (Existing sync logic...)
     status = await message.reply_text("♻️ **Starting Archive Sync...**")
     channels = await Database.get_all_archive_channels()
     total = len(channels)
@@ -258,7 +252,6 @@ async def sync_archive_handler(client, message):
 
 @Clients.bot.on_message(filters.command("statsarchive") & filters.user(Config.OWNER_ID))
 async def stats_archive_handler(client, message):
-    # (Existing stats logic...)
     status = await message.reply_text("📊 Fetching archive stats...")
     stats = await Database.get_archive_stats()
     if not stats: return await status.edit("❌ Failed to fetch archive stats.")
