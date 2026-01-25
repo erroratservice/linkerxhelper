@@ -5,7 +5,11 @@ from pyrogram.errors import (
     ChatAdminRequired,
     UserNotParticipant,
     ChatWriteForbidden,
-    FloodWait
+    FloodWait,
+    ChannelInvalid,
+    PeerIdInvalid,
+    ChannelPrivate,
+    UserAlreadyParticipant
 )
 from datetime import datetime
 from bot.client import Clients
@@ -17,20 +21,26 @@ from config import Config
 from bot.utils.logger import LOGGER
 
 # ==================================================================
-# LOGIC WORKER
+# 1. LOGIC WORKER (The Main Setup Process)
 # ==================================================================
 
 async def archive_logic(message, chat_id, owner_id):
+    """
+    Executes the setup logic after queue and permission checks.
+    """
     LOGGER.info(f"=[ARCHIVE] SETUP STARTED for channel {chat_id}=")
     try:
+        # 1. Add Helper
         await message.edit("➕ **Preparing helper account with FULL access...**")
         LOGGER.info(f"[ARCHIVE] Adding helper to {chat_id}")
         
         await ChannelManager.add_helper_to_channel(chat_id, message)
         
+        # SAFETY: Wait for permissions to sync across DCs
         LOGGER.info("[ARCHIVE] ⏳ Waiting 15s for permissions to propagate...")
         await asyncio.sleep(15)
 
+        # 2. Add Bots
         await message.edit("🤖 **Adding archive bots...**")
         LOGGER.info(f"[ARCHIVE] Starting bot installation via Userbot")
         
@@ -38,9 +48,11 @@ async def archive_logic(message, chat_id, owner_id):
             chat_id, "add", Config.BOTS_TO_ADD, message
         )
         
+        # 3. Save to DB
         LOGGER.info(f"[ARCHIVE] Saving to Archive DB")
         await Database.save_archive_setup(chat_id, owner_id, successful)
         
+        # 4. Result Message
         text = (
             f"✅ **Archive Setup Complete!**\n\n"
             f"📢 Channel: `{chat_id}`\n"
@@ -53,6 +65,8 @@ async def archive_logic(message, chat_id, owner_id):
             
         await message.edit(text)
         
+        # 5. Cleanup (Helper Leaves)
+        # SAFETY: Buffer before leaving to ensure commands processed
         LOGGER.info(f"[ARCHIVE] ⏳ Waiting 5s safety buffer before leaving...")
         await asyncio.sleep(5)
 
@@ -72,7 +86,7 @@ async def archive_logic(message, chat_id, owner_id):
         raise
 
 # ==================================================================
-# HELP ARCHIVE COMMAND
+# 2. HELP ARCHIVE COMMAND (Trigger)
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("helparchive") & (filters.group | filters.channel))
@@ -80,6 +94,7 @@ async def help_archive_handler(client, message):
     
     LOGGER.info(f"[DEBUG] /helparchive triggered in {message.chat.id}")
 
+    # Check Channel Type
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
          try: await message.reply_text("⚠️ This command is for **Channels** only.")
          except: pass
@@ -87,13 +102,13 @@ async def help_archive_handler(client, message):
 
     chat_id = message.chat.id
 
-    # 1. QUEUE CHECK
+    # Check Queue
     if queue_manager.get_position(chat_id):
         try: await message.reply_text("⚠️ This channel is already in queue.")
         except: pass
         return
 
-    # 2. STATUS MESSAGE
+    # Send Status
     status = None
     try:
         status = await message.reply_text("🔍 **Checking permissions...**")
@@ -104,7 +119,7 @@ async def help_archive_handler(client, message):
         LOGGER.error(f"[DEBUG] Initial reply failed: {e}")
         return
     
-    # 3. DATABASE CHECK
+    # Check DB Conflict
     try:
         is_main_setup = await Database.is_channel_in_main_db(chat_id)
         if is_main_setup:
@@ -113,14 +128,13 @@ async def help_archive_handler(client, message):
     except Exception as e:
         LOGGER.error(f"[DEBUG] DB Check failed: {e}")
 
+    # Permission Check
     try:
         LOGGER.info(f"[DEBUG] Fetching fresh chat member data for bot...")
         member = await client.get_chat_member(chat_id, "me")
-        
         privs = member.privileges
         
-        # --- FIXED REQUIREMENTS ---
-        # Removed 'can_manage_topics' as it fails in non-forum channels
+        # FIXED: Removed 'can_manage_topics' to prevent failures in standard channels
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -134,11 +148,12 @@ async def help_archive_handler(client, message):
 
         missing = []
 
-        # Explicit Admin Status Check
+        # 1. Admin Status
         if member.status != ChatMemberStatus.ADMINISTRATOR:
             LOGGER.warning(f"[DEBUG] ❌ Bot is NOT administrator. Status: {member.status}")
             missing.append("Bot must be an Administrator")
 
+        # 2. Individual Privileges
         if not privs:
             LOGGER.warning("[DEBUG] ❌ Privileges object is None!")
             missing.extend(list(required_privs.values()))
@@ -151,7 +166,7 @@ async def help_archive_handler(client, message):
                 if not has_perm:
                     missing.append(label)
 
-        # 4. IF MISSING PERMISSIONS -> SHOW GUIDE
+        # Show Guide if permissions missing
         if missing:
             LOGGER.info(f"[DEBUG] ❌ Missing List: {missing}")
             try: await status.delete()
@@ -168,8 +183,7 @@ async def help_archive_handler(client, message):
                 link = str(Config.PERM_GUIDE_PIC)
                 LOGGER.info(f"[DEBUG] Sending guide using link: {link}")
                 
-                src_chat_id = None
-                src_msg_id = None
+                src_chat_id, src_msg_id = None, None
                 
                 if "/c/" in link: 
                     parts = link.split("/")
@@ -181,12 +195,7 @@ async def help_archive_handler(client, message):
                     src_msg_id = int(parts[-1])
                 
                 if src_chat_id and src_msg_id:
-                    await client.copy_message(
-                        chat_id=chat_id,
-                        from_chat_id=src_chat_id,
-                        message_id=src_msg_id,
-                        caption=caption
-                    )
+                    await client.copy_message(chat_id, src_chat_id, src_msg_id, caption=caption)
                 else:
                     await message.reply_text(caption)
             except Exception as e:
@@ -194,7 +203,7 @@ async def help_archive_handler(client, message):
                  await message.reply_text(caption + "\n\n*(Visual guide unavailable)*")
             return
 
-        # 5. FIND OWNER
+        # Find Owner
         LOGGER.info("[DEBUG] Permissions OK. Finding owner...")
         owner_id = 0
         try:
@@ -206,7 +215,7 @@ async def help_archive_handler(client, message):
         except Exception as e:
             LOGGER.warning(f"[DEBUG] Owner check failed: {e}")
 
-        # 6. START LOGIC
+        # Add to Queue
         LOGGER.info("[DEBUG] Adding to processing queue...")
         await queue_manager.add_to_queue(status, chat_id, owner_id, archive_logic)
 
@@ -215,40 +224,166 @@ async def help_archive_handler(client, message):
         try: await status.edit(f"❌ Error: {e}")
         except: pass
 
-# ... (Sync and Stats handlers remain unchanged) ...
+# ==================================================================
+# 3. SYNC ARCHIVE COMMAND (Advanced Maintenance)
+# ==================================================================
+
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
 async def sync_archive_handler(client, message):
-    status = await message.reply_text("♻️ **Starting Archive Sync...**")
+    """
+    Advanced Maintenance:
+    1. Removes Dead Channels.
+    2. Checks if Bots are missing.
+    3. If missing: Re-adds Helper -> Adds Bots -> Helper Leaves.
+    """
+    status = await message.reply_text("♻️ **Starting Smart Archive Sync...**")
+    
     channels = await Database.get_all_archive_channels()
     total = len(channels)
     processed = 0
-    failed_channels = []
-    LOGGER.info(f"[SYNC-ARCHIVE] Started for {total} channels")
+    deleted = 0
+    repaired = 0
+    skipped = 0
+    
+    LOGGER.info(f"[SYNC-ARCHIVE] Started Smart Sync for {total} channels")
+
+    # List of required bot usernames (cleaned)
+    required_bots = {bot.lstrip('@').lower() for bot in Config.BOTS_TO_ADD}
+
     for channel_data in channels:
         chat_id = channel_data.get("channel_id")
         processed += 1
-        if processed % 5 == 0:
-            try: await status.edit(f"♻️ **Archive Syncing...**\nDo not restart bot.\nProgress: {processed}/{total}")
+        
+        # Update Status every 10 channels
+        if processed % 10 == 0:
+            try: 
+                await status.edit(
+                    f"♻️ **Smart Syncing...**\n"
+                    f"Progress: `{processed}/{total}`\n"
+                    f"🗑 Deleted: `{deleted}`\n"
+                    f"🔧 Repaired: `{repaired}`\n"
+                    f"✅ OK: `{skipped}`"
+                )
             except: pass
+
         try:
-            await Database.archive_channels.update_one(
-                {"channel_id": chat_id},
-                {"$set": {"last_updated": datetime.utcnow()}}
-            )
+            # ====================================================
+            # STEP A: EXISTENCE CHECK
+            # ====================================================
             try:
-                member = await Clients.user_app.get_chat_member(chat_id, "me")
-                if member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
-                    LOGGER.info(f"[SYNC-ARCHIVE] Helper found in {chat_id}, leaving...")
+                # We try to get chat info. If this fails, channel is likely dead/inaccessible
+                await Clients.bot.get_chat(chat_id)
+            except (ChannelInvalid, PeerIdInvalid, ChannelPrivate):
+                LOGGER.warning(f"[SYNC] 🗑 Channel {chat_id} is dead. Removing from DB.")
+                await Database.archive_channels.delete_one({"channel_id": chat_id})
+                deleted += 1
+                continue # Skip to next channel
+            except Exception as e:
+                LOGGER.error(f"[SYNC] ⚠️ Error accessing {chat_id}: {e}")
+                continue
+
+            # ====================================================
+            # STEP B: CHECK BOT STATUS
+            # ====================================================
+            current_bots = set()
+            try:
+                # Get all admins to see which bots are present
+                async for member in Clients.bot.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
+                    if member.user.is_bot:
+                        current_bots.add(member.user.username.lower())
+            except Exception as e:
+                LOGGER.warning(f"[SYNC] Could not fetch admins for {chat_id}: {e}")
+                # If we can't see admins, we might assume we need repair or skip depending on strictness
+            
+            # Calculate missing bots
+            missing_bots = required_bots - current_bots
+            
+            if not missing_bots:
+                # ALL BOTS PRESENT -> Healthy
+                await Database.archive_channels.update_one(
+                    {"channel_id": chat_id},
+                    {"$set": {"last_updated": datetime.utcnow()}}
+                )
+                skipped += 1
+                
+                # Check if Helper is lingering in a healthy channel
+                try:
                     await Clients.user_app.leave_chat(chat_id)
-            except UserNotParticipant: pass
-            except Exception as e: LOGGER.warning(f"[SYNC-ARCHIVE] Helper check warning for {chat_id}: {e}")
+                    LOGGER.info(f"[SYNC] Helper removed from healthy channel {chat_id}")
+                except: pass
+                
+                continue
+
+            # ====================================================
+            # STEP C: REPAIR (Bots are missing)
+            # ====================================================
+            LOGGER.info(f"[SYNC] 🔧 Repairing {chat_id}. Missing: {len(missing_bots)}")
+            
+            # 1. Check/Add Helper
+            helper_me = await Clients.user_app.get_me()
+            helper_in_chat = False
+            
+            try:
+                # Check if helper is already there
+                await Clients.user_app.get_chat_member(chat_id, "me")
+                helper_in_chat = True
+            except UserNotParticipant:
+                helper_in_chat = False
+            except Exception:
+                helper_in_chat = False
+
+            if not helper_in_chat:
+                LOGGER.info(f"[SYNC] ➕ Adding Helper to {chat_id}...")
+                try:
+                    # Main bot adds Helper
+                    await Clients.bot.add_chat_members(chat_id, helper_me.id)
+                    
+                    # Main bot promotes Helper
+                    bot_privs = (await Clients.bot.get_chat_member(chat_id, "me")).privileges
+                    await Clients.bot.promote_chat_member(chat_id, helper_me.id, privileges=bot_privs)
+                    
+                    # SAFETY: Wait for propagation
+                    await asyncio.sleep(10)
+                except Exception as e:
+                    LOGGER.error(f"[SYNC] ❌ Failed to add Helper to {chat_id}: {e}")
+                    continue # Cannot proceed without helper
+
+            # 2. Add Missing Bots (Using Helper)
+            bots_to_install = [f"@{b}" for b in missing_bots]
+            
+            try:
+                await BotManager.process_bots(chat_id, "add", bots_to_install, status_msg=None)
+                repaired += 1
+            except Exception as e:
+                LOGGER.error(f"[SYNC] Failed to install bots in {chat_id}: {e}")
+
+            # 3. Helper Cleanup
+            LOGGER.info(f"[SYNC] 🚪 Helper leaving {chat_id}...")
+            # SAFETY: Buffer before leaving
+            await asyncio.sleep(2) 
+            try:
+                await Clients.user_app.leave_chat(chat_id)
+            except Exception as e:
+                LOGGER.warning(f"[SYNC] Helper failed to leave {chat_id}: {e}")
+
         except Exception as e:
-            LOGGER.error(f"[SYNC-ARCHIVE] Failed {chat_id}: {e}")
-            failed_channels.append(chat_id)
+            LOGGER.error(f"[SYNC] Critical error processing {chat_id}: {e}")
+
+        # Rate Limit Protection
         await asyncio.sleep(Config.SYNC_CHANNEL_DELAY)
-    result_text = (f"✅ **Archive Sync Complete**\n\n📚 Total Scanned: `{total}`\n")
-    if failed_channels: result_text += f"\n⚠️ Errors: {len(failed_channels)} (Check Logs)"
-    await status.edit(result_text)
+
+    # Final Report
+    await status.edit(
+        f"✅ **Smart Sync Complete**\n\n"
+        f"📚 Scanned: `{total}`\n"
+        f"🗑 Removed Dead: `{deleted}`\n"
+        f"🔧 Repaired: `{repaired}`\n"
+        f"✅ Already Healthy: `{skipped}`"
+    )
+
+# ==================================================================
+# 4. STATS ARCHIVE COMMAND
+# ==================================================================
 
 @Clients.bot.on_message(filters.command("statsarchive") & filters.user(Config.OWNER_ID))
 async def stats_archive_handler(client, message):
