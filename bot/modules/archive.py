@@ -34,6 +34,7 @@ async def archive_logic(message, chat_id, owner_id):
         await message.edit("➕ **Preparing helper account with FULL access...**")
         LOGGER.info(f"[ARCHIVE] Adding helper to {chat_id}")
         
+        # Uses ChannelManager to handle Invite Link generation + Joining + Auto-Cleanup
         await ChannelManager.add_helper_to_channel(chat_id, message)
         
         # SAFETY: Wait for permissions to sync across DCs
@@ -134,7 +135,7 @@ async def help_archive_handler(client, message):
         member = await client.get_chat_member(chat_id, "me")
         privs = member.privileges
         
-        # FIXED: Removed 'can_manage_topics' to prevent failures in standard channels
+        # REQUIRED PRIVILEGES (Removed 'can_manage_topics')
         required_privs = {
             "can_manage_chat": "Manage Channel",
             "can_change_info": "Change Channel Info",
@@ -225,7 +226,7 @@ async def help_archive_handler(client, message):
         except: pass
 
 # ==================================================================
-# 3. SYNC ARCHIVE COMMAND (Advanced Maintenance)
+# 3. SYNC ARCHIVE COMMAND (FIXED & SAFE)
 # ==================================================================
 
 @Clients.bot.on_message(filters.command("syncarchive") & filters.user(Config.OWNER_ID))
@@ -234,7 +235,7 @@ async def sync_archive_handler(client, message):
     Advanced Maintenance:
     1. Removes Dead Channels.
     2. Checks if Bots are missing.
-    3. If missing: Re-adds Helper -> Adds Bots -> Helper Leaves.
+    3. If missing: Re-adds Helper (via Link) -> Adds Bots -> Helper Leaves.
     """
     status = await message.reply_text("♻️ **Starting Smart Archive Sync...**")
     
@@ -277,7 +278,7 @@ async def sync_archive_handler(client, message):
                 LOGGER.warning(f"[SYNC] 🗑 Channel {chat_id} is dead. Removing from DB.")
                 await Database.archive_channels.delete_one({"channel_id": chat_id})
                 deleted += 1
-                continue # Skip to next channel
+                continue 
             except Exception as e:
                 LOGGER.error(f"[SYNC] ⚠️ Error accessing {chat_id}: {e}")
                 continue
@@ -293,7 +294,6 @@ async def sync_archive_handler(client, message):
                         current_bots.add(member.user.username.lower())
             except Exception as e:
                 LOGGER.warning(f"[SYNC] Could not fetch admins for {chat_id}: {e}")
-                # If we can't see admins, we might assume we need repair or skip depending on strictness
             
             # Calculate missing bots
             missing_bots = required_bots - current_bots
@@ -306,7 +306,7 @@ async def sync_archive_handler(client, message):
                 )
                 skipped += 1
                 
-                # Check if Helper is lingering in a healthy channel
+                # Check if Helper is lingering in a healthy channel and remove it
                 try:
                     await Clients.user_app.leave_chat(chat_id)
                     LOGGER.info(f"[SYNC] Helper removed from healthy channel {chat_id}")
@@ -324,7 +324,6 @@ async def sync_archive_handler(client, message):
             helper_in_chat = False
             
             try:
-                # Check if helper is already there
                 await Clients.user_app.get_chat_member(chat_id, "me")
                 helper_in_chat = True
             except UserNotParticipant:
@@ -335,12 +334,9 @@ async def sync_archive_handler(client, message):
             if not helper_in_chat:
                 LOGGER.info(f"[SYNC] ➕ Adding Helper to {chat_id}...")
                 try:
-                    # Main bot adds Helper
-                    await Clients.bot.add_chat_members(chat_id, helper_me.id)
-                    
-                    # Main bot promotes Helper
-                    bot_privs = (await Clients.bot.get_chat_member(chat_id, "me")).privileges
-                    await Clients.bot.promote_chat_member(chat_id, helper_me.id, privileges=bot_privs)
+                    # FIX: Use ChannelManager to JOIN via LINK
+                    # Bots cannot use add_chat_members for channels.
+                    await ChannelManager.add_helper_to_channel(chat_id, status_message=None)
                     
                     # SAFETY: Wait for propagation
                     await asyncio.sleep(10)
@@ -359,7 +355,6 @@ async def sync_archive_handler(client, message):
 
             # 3. Helper Cleanup
             LOGGER.info(f"[SYNC] 🚪 Helper leaving {chat_id}...")
-            # SAFETY: Buffer before leaving
             await asyncio.sleep(2) 
             try:
                 await Clients.user_app.leave_chat(chat_id)
